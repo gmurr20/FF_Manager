@@ -63,6 +63,25 @@ class LineupManager:
                 )
             ]
 
+        # Check if team has drafted any players yet
+        actual_players = [p for p in roster.players if not p.is_empty]
+        if not actual_players:
+            logger.info(
+                f"[{roster.platform}] League '{roster.league_name}' (Team: '{roster.team_name}') "
+                f"has no drafted players yet (pre-draft status). Skipping lineup evaluation."
+            )
+            return [
+                ActionResult(
+                    league_id=roster.league_id,
+                    league_name=roster.league_name,
+                    platform=roster.platform,
+                    team_id=roster.team_id,
+                    team_name=roster.team_name,
+                    status="SKIPPED",
+                    message="Team has not drafted yet (pre-draft status).",
+                )
+            ]
+
         has_projections = roster.has_active_projections
         if not has_projections:
             logger.info(

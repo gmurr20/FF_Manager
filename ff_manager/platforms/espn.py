@@ -4,17 +4,17 @@ import datetime
 import logging
 from typing import Any, Dict, List, Optional
 
+from ff_manager.interfaces import FantasyPlatformClient
+from ff_manager.models import Player, Roster, SwapDecision
+
 try:
     import requests
 except ImportError:
     requests = None
 
-from ff_manager.interfaces import FantasyPlatformClient
-from ff_manager.models import Player, Roster, SwapDecision
-
 logger = logging.getLogger(__name__)
 
-# ESPN slot mappings
+# ESPN Lineup Slot ID constants
 ESPN_SLOT_ID_TO_NAME: Dict[int, str] = {
     0: "QB",
     1: "TQB",
@@ -68,8 +68,14 @@ ESPN_POSITION_MAP: Dict[int, str] = {
     3: "WR",
     4: "TE",
     5: "K",
+    6: "P",
     16: "D/ST",
 }
+
+ESPN_API_HOSTS = [
+    "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl",
+    "https://fantasy.espn.com/apis/v3/games/ffl",
+]
 
 
 class ESPNAdapter(FantasyPlatformClient):
@@ -91,8 +97,14 @@ class ESPNAdapter(FantasyPlatformClient):
             year: NFL season year (defaults to current year).
             session: Optional requests.Session instance for testing/mocking.
         """
-        self.espn_s2 = espn_s2
-        self.swid = swid
+        self.espn_s2 = espn_s2.strip('"').strip("'") if espn_s2 else ""
+        raw_swid = swid.strip('"').strip("'") if swid else ""
+        if raw_swid and not raw_swid.startswith("{"):
+            raw_swid = "{" + raw_swid
+        if raw_swid and not raw_swid.endswith("}"):
+            raw_swid = raw_swid + "}"
+        self.swid = raw_swid
+
         self.year = year or datetime.date.today().year
         if session is not None:
             self.session = session
@@ -111,20 +123,20 @@ class ESPNAdapter(FantasyPlatformClient):
     def _setup_session(self) -> None:
         """Configure session cookies and headers for ESPN API requests."""
         if hasattr(self.session, "cookies") and hasattr(self.session.cookies, "set"):
+            self.session.cookies.set("espn_s2", self.espn_s2, domain=".espn.com")
+            self.session.cookies.set("SWID", self.swid, domain=".espn.com")
             self.session.cookies.set("espn_s2", self.espn_s2)
             self.session.cookies.set("SWID", self.swid)
         if hasattr(self.session, "headers") and hasattr(self.session.headers, "update"):
             self.session.headers.update(
                 {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept": "application/json",
                     "X-Fantasy-Platform": "kona-api-web",
                     "X-Fantasy-Source": "kona",
+                    "Cookie": f"espn_s2={self.espn_s2}; SWID={self.swid}",
                 }
             )
-
-    def _get_base_url(self, league_id: str) -> str:
-        return f"https://fantasy.espn.com/apis/v3/games/ffl/seasons/{self.year}/segments/0/leagues/{league_id}"
 
     def validate_connection(self) -> bool:
         """Validate ESPN credentials."""
@@ -134,21 +146,56 @@ class ESPNAdapter(FantasyPlatformClient):
         """Fetch leagues accessible by this user."""
         return []
 
-    def get_roster(self, league_id: str, team_id: Optional[str] = None) -> Roster:
+    def _fetch_league_data(
+        self,
+        league_id: str,
+        views: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """
-        Fetch and normalize the roster for the target ESPN team.
+        Fetch league data from ESPN with fallback across season years and hosts.
         """
         if self.session is None:
             raise RuntimeError("HTTP session not initialized (requests library required).")
 
-        url = self._get_base_url(league_id)
-        params = {
-            "view": ["mRoster", "mTeam", "mSettings", "mMatchupScore"],
-        }
+        params = {}
+        if views:
+            params["view"] = views
 
-        resp = self.session.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        candidate_years = [self.year]
+        for y in [datetime.date.today().year, 2024, 2025, 2026]:
+            if y not in candidate_years:
+                candidate_years.append(y)
+
+        last_error = None
+        for yr in candidate_years:
+            for host in ESPN_API_HOSTS:
+                url = f"{host}/seasons/{yr}/segments/0/leagues/{league_id}"
+                try:
+                    resp = self.session.get(url, params=params, timeout=10)
+                    if resp.status_code in (401, 403, 404):
+                        last_error = f"HTTP {resp.status_code} from {url}"
+                        continue
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        self.year = yr
+                        return data
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+
+        raise ValueError(
+            f"Could not load ESPN league data for league {league_id}. "
+            f"Please verify your ESPN_S2 cookie, SWID, and league ID. Details: {last_error}"
+        )
+
+    def get_roster(self, league_id: str, team_id: Optional[str] = None) -> Roster:
+        """
+        Fetch and normalize the roster for the target ESPN team.
+        """
+        data = self._fetch_league_data(
+            league_id=league_id,
+            views=["mRoster", "mTeam", "mSettings", "mMatchupScore", "mStatus"],
+        )
 
         league_name = data.get("settings", {}).get("name", f"ESPN League {league_id}")
         current_scoring_period = data.get("status", {}).get("currentScoringPeriod", 1)
@@ -166,7 +213,7 @@ class ESPNAdapter(FantasyPlatformClient):
         else:
             clean_swid = self.swid.strip("{}").lower()
             for t in teams:
-                owners = [o.strip("{}").lower() for o in t.get("owners", [])]
+                owners = [str(o).strip("{}").lower() for o in t.get("owners", [])]
                 primary_owner = str(t.get("primaryOwner", "")).strip("{}").lower()
                 if clean_swid in owners or clean_swid == primary_owner:
                     target_team = t
@@ -179,30 +226,36 @@ class ESPNAdapter(FantasyPlatformClient):
             raise ValueError(f"Team {team_id} not found in ESPN league {league_id}")
 
         resolved_team_id = str(target_team.get("id"))
+        raw_name = target_team.get("name")
+        location_nickname = f"{target_team.get('location') or ''} {target_team.get('nickname') or ''}".strip()
         team_name = (
-            f"{target_team.get('location', '')} {target_team.get('nickname', '')}".strip()
-            or f"Team {resolved_team_id}"
+            raw_name.strip()
+            if raw_name and raw_name.strip()
+            else (location_nickname or f"Team {resolved_team_id}")
         )
 
         # Parse roster entries
-        entries = target_team.get("roster", {}).get("entries", [])
+        entries = target_team.get("roster", {}).get("entries", []) or []
         parsed_players: List[Player] = []
 
         for entry in entries:
-            player_pool_entry = entry.get("playerPoolEntry", {})
-            player_data = player_pool_entry.get("player", {})
+            player_pool_entry = entry.get("playerPoolEntry", {}) or {}
+            player_data = player_pool_entry.get("player", {}) or {}
             lineup_slot_id = entry.get("lineupSlotId", 20)
             lineup_slot_name = ESPN_SLOT_ID_TO_NAME.get(lineup_slot_id, "BE")
 
             # Extract player attributes
             pid = str(player_data.get("id", ""))
+            if not pid or pid == "0":
+                continue
+
             full_name = player_data.get("fullName", f"Player {pid}")
             default_pos_id = player_data.get("defaultPositionId", 0)
             position = ESPN_POSITION_MAP.get(default_pos_id, "FLEX")
             injury_status = player_data.get("injuryStatus", "ACTIVE")
 
             # Eligible slots
-            eligible_slot_ids = player_data.get("eligibleSlots", [])
+            eligible_slot_ids = player_data.get("eligibleSlots", []) or []
             eligible_slots = [
                 ESPN_SLOT_ID_TO_NAME.get(sid, str(sid))
                 for sid in eligible_slot_ids
@@ -211,7 +264,7 @@ class ESPNAdapter(FantasyPlatformClient):
 
             # Projected points for current scoring period
             projected_pts = 0.0
-            stats = player_data.get("stats", [])
+            stats = player_data.get("stats", []) or []
             for stat_entry in stats:
                 if (
                     stat_entry.get("scoringPeriodId") == current_scoring_period
@@ -223,7 +276,7 @@ class ESPNAdapter(FantasyPlatformClient):
             # Locked status
             is_locked = bool(player_pool_entry.get("locked", False))
             if not is_locked:
-                pro_team_schedule = player_data.get("proTeamSchedule", {})
+                pro_team_schedule = player_data.get("proTeamSchedule", {}) or {}
                 game_time = pro_team_schedule.get("date")
                 if game_time:
                     try:
@@ -250,37 +303,38 @@ class ESPNAdapter(FantasyPlatformClient):
             )
 
         # Check for empty starting slots based on league roster settings
-        lineup_slot_counts = (
-            data.get("settings", {})
-            .get("rosterSettings", {})
-            .get("lineupSlotCounts", {})
-        )
-        if lineup_slot_counts:
-            for slot_id_str, count in lineup_slot_counts.items():
-                try:
-                    slot_id = int(slot_id_str)
-                    if slot_id in (20, 21):  # Skip bench (20) and IR (21)
-                        continue
-                    slot_name = ESPN_SLOT_ID_TO_NAME.get(slot_id)
-                    if not slot_name:
-                        continue
-                    current_assigned = sum(1 for e in entries if e.get("lineupSlotId") == slot_id)
-                    missing_count = count - current_assigned
-                    for _ in range(max(0, missing_count)):
-                        parsed_players.append(
-                            Player(
-                                player_id="0",
-                                name=f"[Empty {slot_name}]",
-                                position=slot_name,
-                                lineup_slot=slot_name,
-                                eligible_slots=[slot_name],
-                                injury_status="EMPTY",
-                                projected_points=0.0,
-                                is_locked=False,
+        if parsed_players:
+            lineup_slot_counts = (
+                data.get("settings", {})
+                .get("rosterSettings", {})
+                .get("lineupSlotCounts", {})
+            )
+            if lineup_slot_counts:
+                for slot_id_str, count in lineup_slot_counts.items():
+                    try:
+                        slot_id = int(slot_id_str)
+                        if slot_id in (20, 21):  # Skip bench (20) and IR (21)
+                            continue
+                        slot_name = ESPN_SLOT_ID_TO_NAME.get(slot_id)
+                        if not slot_name:
+                            continue
+                        current_assigned = sum(1 for e in entries if e.get("lineupSlotId") == slot_id)
+                        missing_count = count - current_assigned
+                        for _ in range(max(0, missing_count)):
+                            parsed_players.append(
+                                Player(
+                                    player_id="0",
+                                    name=f"[Empty {slot_name}]",
+                                    position=slot_name,
+                                    lineup_slot=slot_name,
+                                    eligible_slots=[slot_name],
+                                    injury_status="EMPTY",
+                                    projected_points=0.0,
+                                    is_locked=False,
+                                )
                             )
-                        )
-                except (ValueError, TypeError):
-                    pass
+                    except (ValueError, TypeError):
+                        pass
 
         return Roster(
             league_id=league_id,
@@ -299,7 +353,7 @@ class ESPNAdapter(FantasyPlatformClient):
         if self.session is None:
             raise RuntimeError("HTTP session not initialized (requests library required).")
 
-        url = f"{self._get_base_url(league_id)}/transactions/"
+        url = f"https://fantasy.espn.com/apis/v3/games/ffl/seasons/{self.year}/segments/0/leagues/{league_id}/transactions/"
         target_slot_id = ESPN_SLOT_NAME_TO_ID.get(swap.slot.upper(), 20)
         bench_slot_id = ESPN_SLOT_NAME_TO_ID.get("BE", 20)
 

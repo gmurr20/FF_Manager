@@ -110,6 +110,37 @@ class TestESPNAdapter(unittest.TestCase):
         self.assertTrue(bench.is_bench)
         self.assertEqual(bench.projected_points, 11.2)
 
+    def test_espn_get_roster_with_modern_name_field(self):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "settings": {"name": "Pro-Am Fantasy 2026"},
+            "status": {"currentScoringPeriod": 1},
+            "teams": [
+                {
+                    "id": 5,
+                    "name": "Greg FC",
+                    "location": None,
+                    "nickname": None,
+                    "primaryOwner": "{1234-SWID}",
+                    "owners": ["{1234-SWID}"],
+                    "roster": {"entries": []},
+                }
+            ],
+        }
+        self.mock_session.get.return_value = mock_resp
+
+        roster = adapter.get_roster(league_id="900098275", team_id="5")
+        self.assertEqual(roster.league_name, "Pro-Am Fantasy 2026")
+        self.assertEqual(roster.team_name, "Greg FC")
+
     def test_espn_execute_swap(self):
         adapter = ESPNAdapter(
             espn_s2="test_s2",
@@ -143,6 +174,37 @@ class TestESPNAdapter(unittest.TestCase):
         self.assertEqual(payload["items"][1]["playerId"], 101)
         self.assertEqual(payload["items"][1]["fromLineupSlotId"], 4)
         self.assertEqual(payload["items"][1]["toLineupSlotId"], 20)
+
+
+    def test_espn_pre_draft_league(self):
+        """Test that a league with an undrafted roster returns an empty roster without error."""
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "settings": {"name": "Pre-Draft League"},
+            "status": {"currentScoringPeriod": 1, "isDrafted": False},
+            "teams": [
+                {
+                    "id": 1,
+                    "location": "Drafting",
+                    "nickname": "Soon",
+                    "owners": ["{1234-SWID}"],
+                    "roster": {"entries": []},
+                }
+            ],
+        }
+        self.mock_session.get.return_value = mock_resp
+
+        roster = adapter.get_roster(league_id="123456", team_id="1")
+        self.assertEqual(roster.league_name, "Pre-Draft League")
+        self.assertEqual(len(roster.players), 0)
 
 
 if __name__ == "__main__":

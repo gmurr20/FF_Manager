@@ -163,6 +163,8 @@ def run() -> int:
         print("=" * 60)
         has_errors = any(r.error or r.status.upper() in ("FAILED", "NO_REPLACEMENT") for r in all_results)
         subject = "⚠️ [Action/Alert] Fantasy Lineup Auto-Manager Report" if has_errors else "🏈 Fantasy Lineup Auto-Manager Action Report"
+        if dry_run:
+            subject = f"[DRY RUN] {subject}"
         print(f"Subject: {subject}")
         print(f"To:      {config.email_to or '[Not Configured]'}")
         print(f"From:    {config.email_from or '[Not Configured]'}")
@@ -170,8 +172,10 @@ def run() -> int:
         print(notifier.build_text_report(all_results))
         print("=" * 60 + "\n")
 
-    if not dry_run:
-        notifier.send_summary(results=all_results, force=force_email)
+    if not dry_run or force_email:
+        notifier.send_summary(results=all_results, force=force_email, dry_run=dry_run)
+    else:
+        logger.info("Dry-run mode enabled and --force-email not set. Email delivery skipped.")
 
     logger.info("Finished.")
     return 0

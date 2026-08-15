@@ -68,8 +68,28 @@ class EmailNotifier:
 
         return f"{swap.slot}: {starter_str} <-> {replacement_str}"
 
+    @staticmethod
+    def format_team_header(platform: str, league_name: str, team_name: Optional[str]) -> str:
+        """Format team section header: 'Platform - League Name - Team Name'."""
+        clean_league = (league_name or "").strip()
+        clean_team = (team_name or "").strip()
+        if clean_team and clean_team != clean_league:
+            return f"{platform} - {clean_league} - {clean_team}"
+        return f"{platform} - {clean_league}"
+
+    @staticmethod
+    def _group_results_by_team(results: List[ActionResult]):
+        """Group action results by (platform, league_id, league_name, team_id, team_name)."""
+        groups = {}
+        for r in results:
+            key = (r.platform, r.league_id, r.league_name, r.team_id, r.team_name)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(r)
+        return groups
+
     def build_text_report(self, results: List[ActionResult]) -> str:
-        """Format plain-text summary report."""
+        """Format plain-text summary report grouped by team."""
         lines = [
             "==================================================",
             "        FANTASY FOOTBALL AUTO-MANAGER REPORT      ",
@@ -81,42 +101,82 @@ class EmailNotifier:
             lines.append("No leagues evaluated.")
             return "\n".join(lines)
 
-        for r in results:
-            lines.append(f"[{r.platform}] {r.league_name} ({r.team_name})")
-            if r.swap:
+        grouped = self._group_results_by_team(results)
+
+        for (platform, lid, league_name, tid, team_name), team_results in grouped.items():
+            header = self.format_team_header(platform, league_name, team_name)
+            lines.append(header)
+
+            swaps = [r for r in team_results if r.swap is not None]
+            non_swaps = [r for r in team_results if r.swap is None]
+
+            for r in swaps:
                 lines.append(f"  • {self.format_swap_line(r.swap)}")
-            else:
+                if r.error:
+                    lines.append(f"    Error: {r.error}")
+
+            for r in non_swaps:
                 lines.append(f"  Status: {r.status} - {r.message}")
-            if r.error:
-                lines.append(f"  Error: {r.error}")
+                if r.error:
+                    lines.append(f"  Error: {r.error}")
+
             lines.append("")
 
         lines.append("==================================================")
         return "\n".join(lines)
 
     def build_html_report(self, results: List[ActionResult]) -> str:
-        """Format clean, modern HTML email report."""
+        """Format clean, modern HTML email report grouped by team."""
+        if not results:
+            return "<p>No leagues evaluated.</p>"
+
+        grouped = self._group_results_by_team(results)
         leagues_html = []
-        for r in results:
-            if r.swap:
+
+        for (platform, lid, league_name, tid, team_name), team_results in grouped.items():
+            header = self.format_team_header(platform, league_name, team_name)
+            swaps = [r for r in team_results if r.swap is not None]
+            non_swaps = [r for r in team_results if r.swap is None]
+
+            items_html = []
+            for r in swaps:
                 swap_line = self.format_swap_line(r.swap)
-                content_html = f"""
-                <div style="background: #f1f5f9; border-left: 4px solid #2563eb; padding: 8px 12px; border-radius: 4px; font-family: monospace, Consolas, Courier, monospace; font-size: 14px; color: #0f172a; margin-top: 6px;">
-                    {swap_line}
-                </div>
-                """
-            else:
-                content_html = f"""
-                <div style="color: #64748b; font-size: 13px; margin-top: 4px;">
-                    {r.status}: {r.message}
-                </div>
-                """
+                error_div = (
+                    f'<div style="color: #dc2626; font-size: 12px; margin-top: 4px;">Error: {r.error}</div>'
+                    if r.error
+                    else ""
+                )
+                items_html.append(
+                    f"""
+                    <div style="background: #f1f5f9; border-left: 4px solid #2563eb; padding: 8px 12px; border-radius: 4px; font-family: monospace, Consolas, Courier, monospace; font-size: 14px; color: #0f172a; margin-top: 6px;">
+                        {swap_line}
+                        {error_div}
+                    </div>
+                    """
+                )
+
+            for r in non_swaps:
+                error_div = (
+                    f'<div style="color: #dc2626; font-size: 12px; margin-top: 2px;">Error: {r.error}</div>'
+                    if r.error
+                    else ""
+                )
+                items_html.append(
+                    f"""
+                    <div style="color: #64748b; font-size: 13px; margin-top: 4px;">
+                        {r.status}: {r.message}
+                        {error_div}
+                    </div>
+                    """
+                )
+
+            content_html = "".join(items_html)
 
             leagues_html.append(
                 f"""
-                <div style="margin-bottom: 18px;">
+                <div style="margin-bottom: 20px;">
                     <div style="font-weight: 600; font-size: 15px; color: #1e293b;">
-                        [{r.platform}] {r.league_name} <span style="font-weight: normal; color: #64748b; font-size: 13px;">({r.team_name})</span>
+                        {header}
                     </div>
                     {content_html}
                 </div>
@@ -137,7 +197,7 @@ class EmailNotifier:
                 </h2>
                 {"".join(leagues_html)}
                 <p style="color: #94a3b8; font-size: 12px; margin-top: 24px; margin-bottom: 0; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 12px;">
-                    Generated automatically by FF_Manager
+                    Generated automatically by FF Manager Bot
                 </p>
             </div>
         </body>
@@ -145,7 +205,12 @@ class EmailNotifier:
         """
         return html
 
-    def send_summary(self, results: List[ActionResult], force: bool = False) -> bool:
+    def send_summary(
+        self,
+        results: List[ActionResult],
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> bool:
         """
         Compile and send an email report if required or forced.
 
@@ -164,6 +229,9 @@ class EmailNotifier:
         has_errors = any(r.error or r.status.upper() in ("FAILED", "NO_REPLACEMENT") for r in results)
         if has_errors:
             subject = "⚠️ [Action/Alert] Fantasy Lineup Auto-Manager Report"
+
+        if dry_run:
+            subject = f"[DRY RUN] {subject}"
 
         msg = email.message.EmailMessage()
         msg["Subject"] = subject
