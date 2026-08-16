@@ -66,6 +66,12 @@ class Config:
         default_factory=lambda: os.getenv("FORCE_EMAIL", "false").lower() in ("true", "1", "yes")
     )
 
+    # Database (Notification Deduplication)
+    database_url: Optional[str] = field(default_factory=lambda: os.getenv("DATABASE_URL"))
+    notification_user_id: str = field(
+        default_factory=lambda: os.getenv("NOTIFICATION_USER_ID", "default")
+    )
+
     @classmethod
     def load(cls) -> "Config":
         """Factory method to load configuration."""
