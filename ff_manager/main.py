@@ -213,36 +213,37 @@ def run() -> int:
     logger.info(f"Notification fingerprint: {fingerprint[:12]}... (NFL week: {nfl_week})" if fingerprint else f"No problems to fingerprint (NFL week: {nfl_week})")
 
     # Email delivery logic
-    if all_clear:
-        # Attempt the all-clear email. If results aren't clean, send_all_clear
-        # returns False and we fall through to the normal alert path.
-        if notifier.send_all_clear(all_results):
-            logger.info("All-clear email sent successfully.")
-            # Clear any saved fingerprint since everything is healthy
-            if db_conn:
-                clear_fingerprint(db_conn, config.notification_user_id)
-        elif not dry_run or force_email:
-            # Problems exist — send the normal action/alert email instead
-            email_sent = notifier.send_summary(results=all_results, force=True, dry_run=dry_run)
-            if email_sent and db_conn and fingerprint:
-                save_fingerprint(db_conn, config.notification_user_id, fingerprint)
-    elif not dry_run or force_email:
-        # Check deduplication before sending
-        should_send = True
-        if db_conn and fingerprint and not force_email:
-            last_fp = get_last_fingerprint(db_conn, config.notification_user_id)
-            if last_fp == fingerprint:
-                logger.info("Notification fingerprint unchanged — suppressing duplicate email.")
-                should_send = False
-
-        if should_send:
-            email_sent = notifier.send_summary(results=all_results, force=force_email, dry_run=dry_run)
-            # Only save fingerprint after successful email delivery (or clear if no problems)
-            if db_conn:
-                if fingerprint and email_sent:
-                    save_fingerprint(db_conn, config.notification_user_id, fingerprint)
-                elif not fingerprint:
+    if not dry_run or force_email:
+        if all_clear:
+            # Attempt the all-clear email. If results aren't clean, send_all_clear
+            # returns False and we fall through to the normal alert path.
+            if notifier.send_all_clear(all_results, dry_run=dry_run):
+                logger.info("All-clear email sent successfully.")
+                # Clear any saved fingerprint since everything is healthy
+                if db_conn:
                     clear_fingerprint(db_conn, config.notification_user_id)
+            else:
+                # Problems exist — send the normal action/alert email instead
+                email_sent = notifier.send_summary(results=all_results, force=True, dry_run=dry_run)
+                if email_sent and db_conn and fingerprint:
+                    save_fingerprint(db_conn, config.notification_user_id, fingerprint)
+        else:
+            # Check deduplication before sending
+            should_send = True
+            if db_conn and fingerprint and not force_email:
+                last_fp = get_last_fingerprint(db_conn, config.notification_user_id)
+                if last_fp == fingerprint:
+                    logger.info("Notification fingerprint unchanged — suppressing duplicate email.")
+                    should_send = False
+
+            if should_send:
+                email_sent = notifier.send_summary(results=all_results, force=force_email, dry_run=dry_run)
+                # Only save fingerprint after successful email delivery (or clear if no problems)
+                if db_conn:
+                    if fingerprint and email_sent:
+                        save_fingerprint(db_conn, config.notification_user_id, fingerprint)
+                    elif not fingerprint:
+                        clear_fingerprint(db_conn, config.notification_user_id)
     else:
         logger.info("Dry-run mode enabled and --force-email not set. Email delivery skipped.")
 

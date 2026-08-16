@@ -369,7 +369,11 @@ class EmailNotifier:
         """
         return html
 
-    def send_all_clear(self, results: List[ActionResult]) -> bool:
+    def send_all_clear(
+        self,
+        results: List[ActionResult],
+        dry_run: bool = False,
+    ) -> bool:
         """
         Send the Sunday "all clear" heartbeat email.
 
@@ -389,6 +393,9 @@ class EmailNotifier:
             return False
 
         subject = "✅ Sunday All Clear — All Starters Active"
+        if dry_run:
+            subject = f"[DRY RUN] {subject}"
+
         text_content = self.build_all_clear_text_report(results)
         html_content = self.build_all_clear_html_report(results)
 

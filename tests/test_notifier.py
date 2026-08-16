@@ -410,6 +410,28 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertIn("All Clear", params["subject"])
 
     @patch("resend.Emails.send")
+    def test_send_all_clear_dry_run(self, mock_send):
+        mock_send.return_value = {"id": "msg_all_clear_dry"}
+
+        notifier = EmailNotifier(
+            api_key="re_test_key",
+            email_to="me@gmail.com",
+            email_from="bot@domain.com",
+        )
+        results = [
+            ActionResult(
+                league_id="1", league_name="L1", platform="Sleeper",
+                team_id="T1", team_name="Team 1",
+                status="NO_ACTION_NEEDED", message="All healthy",
+            ),
+        ]
+        sent = notifier.send_all_clear(results, dry_run=True)
+        self.assertTrue(sent)
+        mock_send.assert_called_once()
+        params = mock_send.call_args[0][0]
+        self.assertTrue(params["subject"].startswith("[DRY RUN]"))
+
+    @patch("resend.Emails.send")
     def test_send_all_clear_skips_when_problems_exist(self, mock_send):
         notifier = EmailNotifier(
             api_key="re_test_key",
