@@ -1,13 +1,72 @@
-"""Email notification and reporting module."""
-
 import email.message
 import logging
 import smtplib
+import socket
 from typing import List, Optional
 
 from ff_manager.models import ActionResult, SwapDecision
 
 logger = logging.getLogger(__name__)
+
+
+def _create_ipv4_connection(
+    address,
+    timeout: Optional[float] = 15,
+    source_address=None,
+):
+    """
+    Connect to (host, port) forcing IPv4 (socket.AF_INET).
+
+    Prevents '[Errno 101] Network is unreachable' on container platforms like Railway
+    where IPv6 DNS resolution succeeds but outbound IPv6 routing is disabled/unavailable.
+    """
+    host, port = address
+    exceptions = []
+    try:
+        addr_entries = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.error as e:
+        logger.warning(
+            f"IPv4 getaddrinfo failed for {host}:{port}: {e}. Falling back to default socket.create_connection."
+        )
+        return socket.create_connection(address, timeout, source_address)
+
+    for res in addr_entries:
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket.socket(af, socktype, proto)
+            if timeout is not None:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            return sock
+        except socket.error as exc:
+            exceptions.append(exc)
+            if sock is not None:
+                sock.close()
+
+    if exceptions:
+        raise exceptions[-1]
+    return socket.create_connection(address, timeout, source_address)
+
+
+class IPv4SMTP(smtplib.SMTP):
+    """SMTP client that forces IPv4 socket connection."""
+
+    def _get_socket(self, host, port, timeout):
+        if timeout is not None and not timeout:
+            raise ValueError("Non-blocking socket (timeout=0) is not supported")
+        return _create_ipv4_connection((host, port), timeout, self.source_address)
+
+
+class IPv4SMTP_SSL(smtplib.SMTP_SSL):
+    """SMTP_SSL client that forces IPv4 socket connection and wraps with SSL."""
+
+    def _get_socket(self, host, port, timeout):
+        new_socket = _create_ipv4_connection((host, port), timeout, self.source_address)
+        new_socket = self.context.wrap_socket(new_socket, server_hostname=self._host)
+        return new_socket
 
 
 class EmailNotifier:
@@ -360,6 +419,12 @@ class EmailNotifier:
         """
         return html
 
+    def _create_smtp_client(self):
+        """Instantiate appropriate IPv4-preferred SMTP or SMTP_SSL client based on port."""
+        if self.smtp_port == 465:
+            return IPv4SMTP_SSL(self.smtp_host, self.smtp_port, timeout=15)
+        return IPv4SMTP(self.smtp_host, self.smtp_port, timeout=15)
+
     def send_all_clear(self, results: List[ActionResult]) -> bool:
         """
         Send the Sunday "all clear" heartbeat email.
@@ -394,8 +459,8 @@ class EmailNotifier:
 
         try:
             logger.info(f"Connecting to SMTP server {self.smtp_host}:{self.smtp_port}...")
-            with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=15) as server:
-                if self.use_tls:
+            with self._create_smtp_client() as server:
+                if self.use_tls and self.smtp_port != 465:
                     server.starttls()
                 if self.smtp_user and self.smtp_password:
                     server.login(self.smtp_user, self.smtp_password)
@@ -450,8 +515,8 @@ class EmailNotifier:
 
         try:
             logger.info(f"Connecting to SMTP server {self.smtp_host}:{self.smtp_port}...")
-            with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=15) as server:
-                if self.use_tls:
+            with self._create_smtp_client() as server:
+                if self.use_tls and self.smtp_port != 465:
                     server.starttls()
                 if self.smtp_user and self.smtp_password:
                     server.login(self.smtp_user, self.smtp_password)

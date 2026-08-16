@@ -222,8 +222,8 @@ def run() -> int:
                 clear_fingerprint(db_conn, config.notification_user_id)
         elif not dry_run or force_email:
             # Problems exist — send the normal action/alert email instead
-            notifier.send_summary(results=all_results, force=True, dry_run=dry_run)
-            if db_conn and fingerprint:
+            email_sent = notifier.send_summary(results=all_results, force=True, dry_run=dry_run)
+            if email_sent and db_conn and fingerprint:
                 save_fingerprint(db_conn, config.notification_user_id, fingerprint)
     elif not dry_run or force_email:
         # Check deduplication before sending
@@ -235,12 +235,12 @@ def run() -> int:
                 should_send = False
 
         if should_send:
-            notifier.send_summary(results=all_results, force=force_email, dry_run=dry_run)
-            # Save fingerprint after sending (or clear if no problems)
+            email_sent = notifier.send_summary(results=all_results, force=force_email, dry_run=dry_run)
+            # Only save fingerprint after successful email delivery (or clear if no problems)
             if db_conn:
-                if fingerprint:
+                if fingerprint and email_sent:
                     save_fingerprint(db_conn, config.notification_user_id, fingerprint)
-                else:
+                elif not fingerprint:
                     clear_fingerprint(db_conn, config.notification_user_id)
     else:
         logger.info("Dry-run mode enabled and --force-email not set. Email delivery skipped.")

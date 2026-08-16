@@ -141,7 +141,7 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertIn("WR: P1 (Out): 0", html_report)
         self.assertIn("QB: P3 (Out): 0", html_report)
 
-    @patch("smtplib.SMTP")
+    @patch("ff_manager.notifications.notifier.IPv4SMTP")
     def test_send_summary_smtp(self, mock_smtp_class):
         mock_server = MagicMock()
         mock_smtp_class.return_value.__enter__.return_value = mock_server
@@ -179,7 +179,7 @@ class TestEmailNotifier(unittest.TestCase):
         mock_server.login.assert_called_once_with("me@gmail.com", "password")
         mock_server.send_message.assert_called_once()
 
-    @patch("smtplib.SMTP")
+    @patch("ff_manager.notifications.notifier.IPv4SMTP")
     def test_send_summary_dry_run_and_force(self, mock_smtp_class):
         mock_server = MagicMock()
         mock_smtp_class.return_value.__enter__.return_value = mock_server
@@ -288,7 +288,7 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertIn("#22c55e", html)  # Green accent color
         self.assertIn("Enjoy the games!", html)
 
-    @patch("smtplib.SMTP")
+    @patch("ff_manager.notifications.notifier.IPv4SMTP")
     def test_send_all_clear_sends_when_healthy(self, mock_smtp_class):
         mock_server = MagicMock()
         mock_smtp_class.return_value.__enter__.return_value = mock_server
@@ -311,7 +311,7 @@ class TestEmailNotifier(unittest.TestCase):
         sent_msg = mock_server.send_message.call_args[0][0]
         self.assertIn("All Clear", sent_msg["Subject"])
 
-    @patch("smtplib.SMTP")
+    @patch("ff_manager.notifications.notifier.IPv4SMTP")
     def test_send_all_clear_skips_when_problems_exist(self, mock_smtp_class):
         mock_server = MagicMock()
         mock_smtp_class.return_value.__enter__.return_value = mock_server
@@ -374,7 +374,7 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertTrue(notifier.should_send_email(results))
         self.assertFalse(notifier.is_all_clear(results))
 
-    @patch("smtplib.SMTP")
+    @patch("ff_manager.notifications.notifier.IPv4SMTP")
     def test_send_summary_sends_alert_on_no_replacement(self, mock_smtp_class):
         mock_server = MagicMock()
         mock_smtp_class.return_value.__enter__.return_value = mock_server
@@ -402,6 +402,43 @@ class TestEmailNotifier(unittest.TestCase):
         mock_server.send_message.assert_called_once()
         sent_msg = mock_server.send_message.call_args[0][0]
         self.assertIn("Action/Alert", sent_msg["Subject"])
+
+    @patch("ff_manager.notifications.notifier.IPv4SMTP_SSL")
+    def test_send_summary_ssl_port_465(self, mock_ssl_class):
+        mock_server = MagicMock()
+        mock_ssl_class.return_value.__enter__.return_value = mock_server
+
+        notifier = EmailNotifier(
+            smtp_host="smtp.gmail.com",
+            smtp_port=465,
+            smtp_user="me@gmail.com",
+            smtp_password="password",
+            email_to="me@gmail.com",
+        )
+        results = [
+            ActionResult(
+                league_id="1",
+                league_name="L1",
+                platform="Sleeper",
+                team_id="T1",
+                team_name="Team 1",
+                status="SUCCESS",
+                message="Swapped",
+                swap=SwapDecision(
+                    starter=Player("1", "P1", "WR", "WR", ["WR"], "OUT", 0.0),
+                    replacement=Player("2", "P2", "WR", "BE", ["WR"], "ACTIVE", 10.0),
+                    slot="WR",
+                    reason="Injury: OUT",
+                ),
+            )
+        ]
+        sent = notifier.send_summary(results)
+        self.assertTrue(sent)
+        mock_ssl_class.assert_called_once_with("smtp.gmail.com", 465, timeout=15)
+        # Port 465 SSL connects directly without starttls()
+        mock_server.starttls.assert_not_called()
+        mock_server.login.assert_called_once_with("me@gmail.com", "password")
+        mock_server.send_message.assert_called_once()
 
 
 if __name__ == "__main__":
