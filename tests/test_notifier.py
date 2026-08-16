@@ -51,7 +51,7 @@ class TestEmailNotifier(unittest.TestCase):
         ]
         self.assertTrue(notifier.should_send_email(success_results))
 
-        # With FAILURE but no swap
+        # With FAILURE but no swap -> Should alert user
         failed_results = [
             ActionResult(
                 league_id="1",
@@ -64,7 +64,7 @@ class TestEmailNotifier(unittest.TestCase):
                 error="Token expired",
             )
         ]
-        self.assertFalse(notifier.should_send_email(failed_results))
+        self.assertTrue(notifier.should_send_email(failed_results))
 
     def test_html_and_text_report_generation(self):
         notifier = EmailNotifier()
@@ -197,6 +197,140 @@ class TestEmailNotifier(unittest.TestCase):
         mock_server.send_message.assert_called_once()
         sent_msg = mock_server.send_message.call_args[0][0]
         self.assertTrue(sent_msg["Subject"].startswith("[DRY RUN]"))
+
+    def test_is_all_clear_with_healthy_results(self):
+        notifier = EmailNotifier()
+        results = [
+            ActionResult(
+                league_id="1", league_name="L1", platform="Sleeper",
+                team_id="T1", team_name="Team 1",
+                status="NO_ACTION_NEEDED", message="All healthy",
+            ),
+            ActionResult(
+                league_id="2", league_name="L2", platform="ESPN",
+                team_id="T2", team_name="Team 2",
+                status="SKIPPED", message="Pre-draft",
+            ),
+        ]
+        self.assertTrue(notifier.is_all_clear(results))
+
+    def test_is_all_clear_false_with_failures(self):
+        notifier = EmailNotifier()
+        results = [
+            ActionResult(
+                league_id="1", league_name="L1", platform="Sleeper",
+                team_id="T1", team_name="Team 1",
+                status="NO_ACTION_NEEDED", message="All healthy",
+            ),
+            ActionResult(
+                league_id="2", league_name="L2", platform="ESPN",
+                team_id="T2", team_name="Team 2",
+                status="FAILED", message="Auth error", error="Token expired",
+            ),
+        ]
+        self.assertFalse(notifier.is_all_clear(results))
+
+    def test_is_all_clear_false_with_swaps(self):
+        notifier = EmailNotifier()
+        swap = SwapDecision(
+            starter=Player("1", "P1", "WR", "WR", ["WR"], "OUT", 0.0),
+            replacement=Player("2", "P2", "WR", "BE", ["WR"], "ACTIVE", 12.0),
+            slot="WR", reason="Injury: OUT",
+        )
+        results = [
+            ActionResult(
+                league_id="1", league_name="L1", platform="Sleeper",
+                team_id="T1", team_name="Team 1",
+                status="SUCCESS", message="Swapped", swap=swap,
+            ),
+        ]
+        self.assertFalse(notifier.is_all_clear(results))
+
+    def test_is_all_clear_false_with_empty_results(self):
+        notifier = EmailNotifier()
+        self.assertFalse(notifier.is_all_clear([]))
+
+    def test_build_all_clear_text_report(self):
+        notifier = EmailNotifier()
+        results = [
+            ActionResult(
+                league_id="1", league_name="Champions League",
+                platform="ESPN", team_id="T1", team_name="Top Dogs",
+                status="NO_ACTION_NEEDED",
+                message="All starters are healthy and scheduled to play.",
+            ),
+            ActionResult(
+                league_id="2", league_name="ILLest League",
+                platform="Sleeper", team_id="T2", team_name="Ben Johnson Glazer",
+                status="NO_ACTION_NEEDED",
+                message="All starters are healthy and scheduled to play.",
+            ),
+        ]
+        text = notifier.build_all_clear_text_report(results)
+        self.assertIn("SUNDAY ALL CLEAR", text)
+        self.assertIn("ESPN - Champions League - Top Dogs", text)
+        self.assertIn("Sleeper - ILLest League - Ben Johnson Glazer", text)
+        self.assertIn("All lineups are set. No action required.", text)
+
+    def test_build_all_clear_html_report(self):
+        notifier = EmailNotifier()
+        results = [
+            ActionResult(
+                league_id="1", league_name="Champions League",
+                platform="ESPN", team_id="T1", team_name="Top Dogs",
+                status="NO_ACTION_NEEDED",
+                message="All starters are healthy and scheduled to play.",
+            ),
+        ]
+        html = notifier.build_all_clear_html_report(results)
+        self.assertIn("Sunday All Clear", html)
+        self.assertIn("ESPN - Champions League - Top Dogs", html)
+        self.assertIn("#22c55e", html)  # Green accent color
+        self.assertIn("Enjoy the games!", html)
+
+    @patch("smtplib.SMTP")
+    def test_send_all_clear_sends_when_healthy(self, mock_smtp_class):
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        notifier = EmailNotifier(
+            smtp_host="smtp.gmail.com", smtp_port=587,
+            smtp_user="me@gmail.com", smtp_password="password",
+            email_to="me@gmail.com",
+        )
+        results = [
+            ActionResult(
+                league_id="1", league_name="L1", platform="Sleeper",
+                team_id="T1", team_name="Team 1",
+                status="NO_ACTION_NEEDED", message="All healthy",
+            ),
+        ]
+        sent = notifier.send_all_clear(results)
+        self.assertTrue(sent)
+        mock_server.send_message.assert_called_once()
+        sent_msg = mock_server.send_message.call_args[0][0]
+        self.assertIn("All Clear", sent_msg["Subject"])
+
+    @patch("smtplib.SMTP")
+    def test_send_all_clear_skips_when_problems_exist(self, mock_smtp_class):
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        notifier = EmailNotifier(
+            smtp_host="smtp.gmail.com", smtp_port=587,
+            smtp_user="me@gmail.com", smtp_password="password",
+            email_to="me@gmail.com",
+        )
+        results = [
+            ActionResult(
+                league_id="1", league_name="L1", platform="ESPN",
+                team_id="T1", team_name="Team 1",
+                status="FAILED", message="Auth error", error="Token expired",
+            ),
+        ]
+        sent = notifier.send_all_clear(results)
+        self.assertFalse(sent)
+        mock_server.send_message.assert_not_called()
 
 
 if __name__ == "__main__":

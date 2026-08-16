@@ -133,7 +133,7 @@ class TestSleeperAdapter(unittest.TestCase):
         self.assertEqual(bench[0].lineup_slot, "BE")
         self.assertEqual(bench[0].projected_points, 12.8)
 
-    def test_sleeper_execute_swap_rest(self):
+    def test_sleeper_execute_swap_graphql(self):
         adapter = SleeperAdapter(
             auth_token="test_jwt_token",
             user_id="user_123",
@@ -158,6 +158,18 @@ class TestSleeperAdapter(unittest.TestCase):
 
         mock_post_resp = MagicMock()
         mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {
+            "data": {
+                "matchup_res": {
+                    "roster_id": 1,
+                    "starters": ["4046", "7564"],
+                },
+                "roster_res": {
+                    "roster_id": 1,
+                    "starters": ["4046", "7564"],
+                },
+            }
+        }
         self.mock_session.post.return_value = mock_post_resp
 
         starter = Player("6797", "Justin Jefferson", "WR", "WR", ["WR"], "OUT", 0.0)
@@ -169,9 +181,10 @@ class TestSleeperAdapter(unittest.TestCase):
         self.assertTrue(success)
         self.mock_session.post.assert_called_once()
         call_args = self.mock_session.post.call_args
-        self.assertIn("roster/1/starters", call_args[0][0])
+        self.assertIn("graphql", call_args[0][0])
         payload = call_args[1]["json"]
-        self.assertEqual(payload["starters"], ["4046", "7564"])
+        self.assertIn("roster_update_starters", payload["query"])
+        self.assertIn('"4046", "7564"', payload["query"])
         self.assertEqual(call_args[1]["headers"]["authorization"], "test_jwt_token")
 
 

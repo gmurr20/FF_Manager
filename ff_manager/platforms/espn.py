@@ -113,6 +113,7 @@ class ESPNAdapter(FantasyPlatformClient):
         else:
             self.session = None
 
+        self.last_error: Optional[str] = None
         if self.session is not None:
             self._setup_session()
 
@@ -390,12 +391,17 @@ class ESPNAdapter(FantasyPlatformClient):
             f"[ESPN] Sending transaction to {url} for league {league_id}, team {team_id}: {payload}"
         )
 
+        self.last_error = None
         resp = self.session.post(url, json=payload, timeout=10)
         if resp.status_code in (200, 201, 204):
             logger.info(f"[ESPN] Roster swap succeeded: {swap}")
             return True
         else:
-            logger.error(
-                f"[ESPN] Roster swap failed ({resp.status_code}): {resp.text}"
-            )
+            try:
+                err_json = resp.json()
+                err_msg = err_json.get("message") or err_json.get("error", {}).get("message") or str(err_json)
+            except Exception:
+                err_msg = resp.text
+            self.last_error = f"HTTP {resp.status_code}: {err_msg}"
+            logger.error(f"[ESPN] Roster swap failed: {self.last_error}")
             return False

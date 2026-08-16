@@ -210,6 +210,10 @@ class LineupManager:
                             )
                         )
                     else:
+                        error_detail = (
+                            getattr(self.client, "last_error", None)
+                            or "API swap rejected by platform."
+                        )
                         results.append(
                             ActionResult(
                                 league_id=roster.league_id,
@@ -218,9 +222,9 @@ class LineupManager:
                                 team_id=roster.team_id,
                                 team_name=roster.team_name,
                                 status="FAILED",
-                                message=f"Platform returned failure executing swap for {starter.name}.",
+                                message=f"Platform returned failure executing swap for {starter.name}: {error_detail}",
                                 swap=decision,
-                                error="API swap failed",
+                                error=error_detail,
                             )
                         )
                 except Exception as e:

@@ -48,6 +48,11 @@ def run() -> int:
         help="Send summary email even if no swaps were made.",
     )
     parser.add_argument(
+        "--all-clear",
+        action="store_true",
+        help="Send a confirmation 'all clear' email if all starters are healthy. Intended for the Sunday 11:30 AM CT cron run.",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default=None,
@@ -61,6 +66,7 @@ def run() -> int:
     dry_run = args.dry_run or config.dry_run
     log_level = args.log_level or config.log_level
     force_email = args.force_email or config.force_email
+    all_clear = args.all_clear
 
     setup_logging(log_level)
     logger = logging.getLogger("ff_manager")
@@ -161,18 +167,35 @@ def run() -> int:
         print("\n" + "=" * 60)
         print("                EMAIL NOTIFICATION PREVIEW                 ")
         print("=" * 60)
-        has_errors = any(r.error or r.status.upper() in ("FAILED", "NO_REPLACEMENT") for r in all_results)
-        subject = "⚠️ [Action/Alert] Fantasy Lineup Auto-Manager Report" if has_errors else "🏈 Fantasy Lineup Auto-Manager Action Report"
-        if dry_run:
-            subject = f"[DRY RUN] {subject}"
-        print(f"Subject: {subject}")
-        print(f"To:      {config.email_to or '[Not Configured]'}")
-        print(f"From:    {config.email_from or '[Not Configured]'}")
-        print("-" * 60)
-        print(notifier.build_text_report(all_results))
+        if all_clear and notifier.is_all_clear(all_results):
+            subject = "✅ Sunday All Clear — All Starters Active"
+            print(f"Subject: {subject}")
+            print(f"To:      {config.email_to or '[Not Configured]'}")
+            print(f"From:    {config.email_from or '[Not Configured]'}")
+            print("-" * 60)
+            print(notifier.build_all_clear_text_report(all_results))
+        else:
+            has_errors = any(r.error or r.status.upper() in ("FAILED", "NO_REPLACEMENT") for r in all_results)
+            subject = "⚠️ [Action/Alert] Fantasy Lineup Auto-Manager Report" if has_errors else "🏈 Fantasy Lineup Auto-Manager Action Report"
+            if dry_run:
+                subject = f"[DRY RUN] {subject}"
+            print(f"Subject: {subject}")
+            print(f"To:      {config.email_to or '[Not Configured]'}")
+            print(f"From:    {config.email_from or '[Not Configured]'}")
+            print("-" * 60)
+            print(notifier.build_text_report(all_results))
         print("=" * 60 + "\n")
 
-    if not dry_run or force_email:
+    # Email delivery logic
+    if all_clear:
+        # Attempt the all-clear email. If results aren't clean, send_all_clear
+        # returns False and we fall through to the normal alert path.
+        if notifier.send_all_clear(all_results):
+            logger.info("All-clear email sent successfully.")
+        elif not dry_run or force_email:
+            # Problems exist — send the normal action/alert email instead
+            notifier.send_summary(results=all_results, force=True, dry_run=dry_run)
+    elif not dry_run or force_email:
         notifier.send_summary(results=all_results, force=force_email, dry_run=dry_run)
     else:
         logger.info("Dry-run mode enabled and --force-email not set. Email delivery skipped.")

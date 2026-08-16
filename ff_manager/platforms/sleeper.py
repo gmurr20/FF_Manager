@@ -1,6 +1,7 @@
 """Sleeper Fantasy Football Platform Adapter."""
 
 import datetime
+import json
 import logging
 from typing import Any, Dict, List, Optional, Set
 
@@ -50,6 +51,8 @@ class SleeperAdapter(FantasyPlatformClient):
 
         self._players_cache: Optional[Dict[str, Any]] = None
         self._nfl_state_cache: Optional[Dict[str, Any]] = None
+        self._active_roster_starters: Dict[str, List[str]] = {}
+        self.last_error: Optional[str] = None
 
     @property
     def platform_name(self) -> str:
@@ -91,10 +94,12 @@ class SleeperAdapter(FantasyPlatformClient):
             return False
 
     def _get_headers(self) -> Dict[str, str]:
-        """Headers for authenticated mutations."""
+        """Headers for Sleeper requests and authenticated mutations."""
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
             "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
         }
         if self.auth_token:
             headers["authorization"] = self.auth_token
@@ -164,7 +169,7 @@ class SleeperAdapter(FantasyPlatformClient):
 
         # 1. Fetch league settings to get roster_positions and league name
         league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
-        league_resp = self.session.get(league_url, timeout=10)
+        league_resp = self.session.get(league_url, headers=self._get_headers(), timeout=10)
         league_resp.raise_for_status()
         league_data = league_resp.json()
         league_name = league_data.get("name", f"Sleeper League {league_id}")
@@ -175,7 +180,7 @@ class SleeperAdapter(FantasyPlatformClient):
 
         # 2. Fetch all league rosters
         rosters_url = f"{SLEEPER_API_BASE}/league/{league_id}/rosters"
-        rosters_resp = self.session.get(rosters_url, timeout=10)
+        rosters_resp = self.session.get(rosters_url, headers=self._get_headers(), timeout=10)
         rosters_resp.raise_for_status()
         rosters_data = rosters_resp.json()
 
@@ -224,6 +229,9 @@ class SleeperAdapter(FantasyPlatformClient):
             )
 
         resolved_roster_id = str(target_roster.get("roster_id"))
+        self._active_roster_starters[f"{league_id}_{resolved_roster_id}"] = list(
+            target_roster.get("starters", []) or []
+        )
 
         # Fetch user team name / users in league for display name
         team_name = f"Team {resolved_roster_id}"
@@ -251,10 +259,30 @@ class SleeperAdapter(FantasyPlatformClient):
             scoring_settings=scoring_settings,
         )
 
+        # Check if matchups endpoint has active week starters for this roster
+        matchup_starters = None
+        try:
+            matchups_url = f"{SLEEPER_API_BASE}/league/{league_id}/matchups/{current_week}"
+            m_resp = self.session.get(matchups_url, headers=self._get_headers(), timeout=10)
+            if m_resp.status_code == 200:
+                for m in m_resp.json() or []:
+                    if str(m.get("roster_id")) == resolved_roster_id:
+                        m_starters = m.get("starters")
+                        if m_starters:
+                            matchup_starters = list(m_starters)
+                            break
+        except Exception:
+            pass
+
         # 5. Build Player models
         players_meta = self.get_players_metadata()
         all_roster_player_ids = target_roster.get("players", []) or []
-        starters_list = target_roster.get("starters", []) or []
+        starters_list = (
+            matchup_starters
+            if matchup_starters is not None
+            else (target_roster.get("starters", []) or [])
+        )
+        self._active_roster_starters[f"{league_id}_{resolved_roster_id}"] = list(starters_list)
         reserve_list = target_roster.get("reserve", []) or []
 
         # Map starters to their respective slot position
@@ -504,29 +532,34 @@ class SleeperAdapter(FantasyPlatformClient):
             logger.error("[Sleeper] Cannot execute swap: SLEEPER_TOKEN is not configured.")
             return False
 
-        rosters_url = f"{SLEEPER_API_BASE}/league/{league_id}/rosters"
-        rosters_resp = self.session.get(rosters_url, timeout=10)
-        rosters_resp.raise_for_status()
-        rosters_data = rosters_resp.json()
+        roster_key = f"{league_id}_{team_id}"
+        if roster_key in self._active_roster_starters:
+            current_starters = list(self._active_roster_starters[roster_key])
+        else:
+            rosters_url = f"{SLEEPER_API_BASE}/league/{league_id}/rosters"
+            rosters_resp = self.session.get(rosters_url, headers=self._get_headers(), timeout=10)
+            rosters_resp.raise_for_status()
+            rosters_data = rosters_resp.json()
 
-        target_roster = None
-        for r in rosters_data:
-            if str(r.get("roster_id")) == str(team_id):
-                target_roster = r
-                break
+            target_roster = None
+            for r in rosters_data:
+                if str(r.get("roster_id")) == str(team_id):
+                    target_roster = r
+                    break
 
-        if not target_roster:
-            logger.error(f"[Sleeper] Roster {team_id} not found in league {league_id}")
-            return False
+            if not target_roster:
+                logger.error(f"[Sleeper] Roster {team_id} not found in league {league_id}")
+                return False
 
-        current_starters: List[str] = list(target_roster.get("starters", []))
+            current_starters = list(target_roster.get("starters", []))
+
         starter_id = swap.starter.player_id
         replacement_id = swap.replacement.player_id
 
         if swap.starter.is_empty or starter_id not in current_starters:
             # Need to place replacement in an empty slot ('0', '', or unassigned index)
             league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
-            league_resp = self.session.get(league_url, timeout=10)
+            league_resp = self.session.get(league_url, headers=self._get_headers(), timeout=10)
             roster_positions = (
                 league_resp.json().get("roster_positions", [])
                 if league_resp.status_code == 200
@@ -561,46 +594,103 @@ class SleeperAdapter(FantasyPlatformClient):
                 replacement_id if pid == starter_id else pid for pid in current_starters
             ]
 
-        rest_url = f"{SLEEPER_API_BASE}/roster/{team_id}/starters"
         headers = self._get_headers()
-        payload = {"starters": updated_starters}
+        logger.info(f"[Sleeper] Updating starters for roster {team_id}: {updated_starters}")
+        self.last_error = None
 
-        try:
-            logger.info(f"[Sleeper] Updating starters for roster {team_id}: {updated_starters}")
-            resp = self.session.post(rest_url, json=payload, headers=headers, timeout=10)
-            if resp.status_code in (200, 201, 204):
-                logger.info(f"[Sleeper] Successfully updated starters via REST: {swap}")
-                return True
-        except Exception as e:
-            logger.warning(f"[Sleeper] REST update starters encountered error: {e}")
+        nfl_state = self.get_nfl_state()
+        current_week = nfl_state.get("week", 1)
 
+        # Primary: Sleeper GraphQL mutation (matchup leg for active week + base roster)
         try:
-            graphql_query = """
-            mutation update_starters($league_id: ID!, $roster_id: ID!, $starters: [ID!]) {
-                update_starters(league_id: $league_id, roster_id: $roster_id, starters: $starters)
-            }
+            formatted_starters = json.dumps(updated_starters)
+            graphql_query = f"""
+            mutation {{
+                matchup_res: update_matchup_leg(
+                    round: {current_week},
+                    leg: 1,
+                    league_id: "{league_id}",
+                    roster_id: {int(team_id)},
+                    starters: {formatted_starters}
+                ) {{
+                    roster_id
+                    starters
+                }}
+                roster_res: roster_update_starters(
+                    league_id: "{league_id}",
+                    roster_id: {int(team_id)},
+                    starters: {formatted_starters}
+                ) {{
+                    roster_id
+                    starters
+                }}
+            }}
             """
-            variables = {
-                "league_id": str(league_id),
-                "roster_id": str(team_id),
-                "starters": updated_starters,
-            }
             gql_resp = self.session.post(
                 SLEEPER_GRAPHQL_URL,
-                json={"query": graphql_query, "variables": variables},
+                json={"query": graphql_query},
                 headers=headers,
                 timeout=10,
             )
             if gql_resp.status_code == 200:
                 data = gql_resp.json()
-                if "errors" not in data:
-                    logger.info(f"[Sleeper] Successfully updated starters via GraphQL: {swap}")
-                    return True
-                else:
-                    logger.error(f"[Sleeper] GraphQL returned errors: {data['errors']}")
+                if "errors" not in data and "data" in data:
+                    res_data = data.get("data", {})
+                    updated_from_gql = (
+                        res_data.get("matchup_res", {}).get("starters")
+                        or res_data.get("roster_res", {}).get("starters")
+                        or updated_starters
+                    )
+                    self._active_roster_starters[roster_key] = updated_from_gql
+
+                    # Post-swap verification: ensure replacement is present in lineup
+                    if replacement_id in updated_from_gql:
+                        logger.info(f"[Sleeper] Verified swap in starting lineup: {swap}")
+                        return True
+                    else:
+                        self.last_error = f"Post-swap verification failed: player {replacement_id} missing from starters: {updated_from_gql}"
+                        logger.error(f"[Sleeper] {self.last_error}")
+                        return False
+                elif "errors" in data:
+                    err_msgs = [e.get("message", str(e)) for e in data["errors"]]
+                    self.last_error = "; ".join(err_msgs)
+                    logger.error(f"[Sleeper] GraphQL returned errors: {self.last_error}")
             else:
+                self.last_error = f"HTTP {gql_resp.status_code}: {gql_resp.text}"
                 logger.error(f"[Sleeper] GraphQL update failed ({gql_resp.status_code}): {gql_resp.text}")
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f"[Sleeper] GraphQL mutation exception: {e}")
+
+        # Fallback: Individual roster_update_starters if multi-mutation is unsupported
+        try:
+            formatted_starters = json.dumps(updated_starters)
+            gql_single_query = f"""
+            mutation {{
+                roster_update_starters(
+                    league_id: "{league_id}",
+                    roster_id: {int(team_id)},
+                    starters: {formatted_starters}
+                ) {{
+                    roster_id
+                    starters
+                }}
+            }}
+            """
+            gql_resp2 = self.session.post(
+                SLEEPER_GRAPHQL_URL,
+                json={"query": gql_single_query},
+                headers=headers,
+                timeout=10,
+            )
+            if gql_resp2.status_code == 200:
+                data2 = gql_resp2.json()
+                if "errors" not in data2 and "data" in data2 and data2["data"].get("roster_update_starters"):
+                    res_starters = data2["data"]["roster_update_starters"].get("starters")
+                    self._active_roster_starters[roster_key] = res_starters or updated_starters
+                    logger.info(f"[Sleeper] Successfully updated starters via single GraphQL: {swap}")
+                    return True
+        except Exception:
+            pass
 
         return False

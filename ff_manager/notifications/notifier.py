@@ -39,10 +39,12 @@ class EmailNotifier:
     def should_send_email(self, results: List[ActionResult]) -> bool:
         """
         Determine if an email should be sent.
-        Sends if and only if a roster change was actually made (at least one successful swap).
+        Sends if a roster change was made OR if any errors/failures occurred.
         """
         for r in results:
             if r.swap is not None and "SUCCESS" in r.status.upper():
+                return True
+            if r.error or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT"):
                 return True
         return False
 
@@ -105,20 +107,38 @@ class EmailNotifier:
 
         for (platform, lid, league_name, tid, team_name), team_results in grouped.items():
             header = self.format_team_header(platform, league_name, team_name)
-            lines.append(header)
 
             swaps = [r for r in team_results if r.swap is not None]
             non_swaps = [r for r in team_results if r.swap is None]
 
+            # Determine if this team has any issues
+            team_has_issues = any(
+                r.swap is not None
+                or r.error
+                or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+                for r in team_results
+            )
+
+            if team_has_issues:
+                lines.append(f"🚨 {header}")
+            else:
+                lines.append(f"✅ {header}")
+
             for r in swaps:
-                lines.append(f"  • {self.format_swap_line(r.swap)}")
+                is_failed = "FAIL" in r.status.upper() or "ERROR" in r.status.upper()
+                prefix = "  ❌ [FAILED]" if is_failed else "  •"
+                lines.append(f"{prefix} {self.format_swap_line(r.swap)}")
                 if r.error:
-                    lines.append(f"    Error: {r.error}")
+                    lines.append(f"     Reason: {r.error}")
 
             for r in non_swaps:
-                lines.append(f"  Status: {r.status} - {r.message}")
-                if r.error:
-                    lines.append(f"  Error: {r.error}")
+                is_problem = r.error or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+                if is_problem:
+                    lines.append(f"  ⚠️  {r.message}")
+                    if r.error:
+                        lines.append(f"     Error: {r.error}")
+                else:
+                    lines.append(f"  {r.message}")
 
             lines.append("")
 
@@ -138,45 +158,77 @@ class EmailNotifier:
             swaps = [r for r in team_results if r.swap is not None]
             non_swaps = [r for r in team_results if r.swap is None]
 
+            # Determine if this team has any issues
+            team_has_issues = any(
+                r.swap is not None
+                or r.error
+                or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+                for r in team_results
+            )
+
             items_html = []
             for r in swaps:
                 swap_line = self.format_swap_line(r.swap)
-                error_div = (
-                    f'<div style="color: #dc2626; font-size: 12px; margin-top: 4px;">Error: {r.error}</div>'
-                    if r.error
-                    else ""
-                )
-                items_html.append(
-                    f"""
-                    <div style="background: #f1f5f9; border-left: 4px solid #2563eb; padding: 8px 12px; border-radius: 4px; font-family: monospace, Consolas, Courier, monospace; font-size: 14px; color: #0f172a; margin-top: 6px;">
-                        {swap_line}
-                        {error_div}
-                    </div>
-                    """
-                )
+                is_failed = "FAIL" in r.status.upper() or "ERROR" in r.status.upper()
+                if is_failed:
+                    error_msg = r.error or "Swap rejected by platform"
+                    items_html.append(
+                        f"""
+                        <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 8px 12px; border-radius: 4px; font-family: monospace, Consolas, Courier, monospace; font-size: 14px; color: #991b1b; margin-top: 6px;">
+                            <div style="font-weight: 600;">❌ FAILED: {swap_line}</div>
+                            <div style="color: #dc2626; font-size: 12px; margin-top: 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">Reason: {error_msg}</div>
+                        </div>
+                        """
+                    )
+                else:
+                    items_html.append(
+                        f"""
+                        <div style="background: #f1f5f9; border-left: 4px solid #2563eb; padding: 8px 12px; border-radius: 4px; font-family: monospace, Consolas, Courier, monospace; font-size: 14px; color: #0f172a; margin-top: 6px;">
+                            {swap_line}
+                        </div>
+                        """
+                    )
 
             for r in non_swaps:
-                error_div = (
-                    f'<div style="color: #dc2626; font-size: 12px; margin-top: 2px;">Error: {r.error}</div>'
-                    if r.error
-                    else ""
-                )
-                items_html.append(
-                    f"""
-                    <div style="color: #64748b; font-size: 13px; margin-top: 4px;">
-                        {r.status}: {r.message}
-                        {error_div}
-                    </div>
-                    """
-                )
+                is_problem = r.error or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+                if is_problem:
+                    error_div = (
+                        f'<div style="color: #dc2626; font-size: 12px; margin-top: 2px;">Error: {r.error}</div>'
+                        if r.error
+                        else ""
+                    )
+                    items_html.append(
+                        f"""
+                        <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 8px 12px; border-radius: 4px; font-size: 13px; color: #991b1b; margin-top: 6px;">
+                            <div style="font-weight: 600;">⚠️ {r.message}</div>
+                            {error_div}
+                        </div>
+                        """
+                    )
+                else:
+                    items_html.append(
+                        f"""
+                        <div style="color: #94a3b8; font-size: 13px; margin-top: 4px;">
+                            ✅ {r.message}
+                        </div>
+                        """
+                    )
 
             content_html = "".join(items_html)
+
+            # Style the header differently based on whether the team has issues
+            if team_has_issues:
+                header_style = "font-weight: 600; font-size: 15px; color: #991b1b;"
+                header_icon = "🚨 "
+            else:
+                header_style = "font-weight: 600; font-size: 15px; color: #64748b;"
+                header_icon = ""
 
             leagues_html.append(
                 f"""
                 <div style="margin-bottom: 20px;">
-                    <div style="font-weight: 600; font-size: 15px; color: #1e293b;">
-                        {header}
+                    <div style="{header_style}">
+                        {header_icon}{header}
                     </div>
                     {content_html}
                 </div>
@@ -204,6 +256,145 @@ class EmailNotifier:
         </html>
         """
         return html
+
+    def is_all_clear(self, results: List[ActionResult]) -> bool:
+        """
+        Determine if all results represent a clean, healthy state.
+        Returns True only when every result is NO_ACTION_NEEDED or SKIPPED (pre-draft).
+        """
+        if not results:
+            return False
+        return all(
+            r.status.upper() in ("NO_ACTION_NEEDED", "SKIPPED") for r in results
+        )
+
+    def build_all_clear_text_report(self, results: List[ActionResult]) -> str:
+        """Format plain-text 'all clear' confirmation report."""
+        lines = [
+            "==================================================",
+            "   ✅ SUNDAY ALL CLEAR — ALL STARTERS ACTIVE      ",
+            "==================================================",
+            "",
+        ]
+
+        if not results:
+            lines.append("No leagues evaluated.")
+            return "\n".join(lines)
+
+        grouped = self._group_results_by_team(results)
+
+        for (platform, lid, league_name, tid, team_name), team_results in grouped.items():
+            header = self.format_team_header(platform, league_name, team_name)
+            lines.append(f"✅ {header}")
+            for r in team_results:
+                lines.append(f"   {r.status}: {r.message}")
+            lines.append("")
+
+        lines.append("All lineups are set. No action required.")
+        lines.append("==================================================")
+        return "\n".join(lines)
+
+    def build_all_clear_html_report(self, results: List[ActionResult]) -> str:
+        """Format clean HTML 'all clear' confirmation email."""
+        if not results:
+            return "<p>No leagues evaluated.</p>"
+
+        grouped = self._group_results_by_team(results)
+        leagues_html = []
+
+        for (platform, lid, league_name, tid, team_name), team_results in grouped.items():
+            header = self.format_team_header(platform, league_name, team_name)
+
+            status_items = []
+            for r in team_results:
+                status_items.append(
+                    f'<div style="color: #15803d; font-size: 13px; margin-top: 4px;">'
+                    f"✅ {r.message}</div>"
+                )
+
+            leagues_html.append(
+                f"""
+                <div style="margin-bottom: 16px;">
+                    <div style="font-weight: 600; font-size: 15px; color: #1e293b;">
+                        {header}
+                    </div>
+                    <div style="background: #f0fdf4; border-left: 4px solid #22c55e; padding: 8px 12px; border-radius: 4px; margin-top: 6px;">
+                        {"".join(status_items)}
+                    </div>
+                </div>
+                """
+            )
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Sunday All Clear</title>
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px;">
+            <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; border: 1px solid #e2e8f0; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <h2 style="color: #15803d; margin-top: 0; margin-bottom: 16px; font-size: 18px; border-bottom: 2px solid #22c55e; padding-bottom: 8px;">
+                    ✅ Sunday All Clear — All Starters Active
+                </h2>
+                {"".join(leagues_html)}
+                <p style="color: #15803d; font-size: 14px; font-weight: 500; margin-top: 16px; margin-bottom: 8px;">
+                    All lineups are set. No action required. Enjoy the games! 🏈
+                </p>
+                <p style="color: #94a3b8; font-size: 12px; margin-top: 24px; margin-bottom: 0; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 12px;">
+                    Generated automatically by FF Manager Bot
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+        return html
+
+    def send_all_clear(self, results: List[ActionResult]) -> bool:
+        """
+        Send the Sunday "all clear" heartbeat email.
+
+        Only sends if every result is NO_ACTION_NEEDED or SKIPPED.
+        Returns False if results contain problems (caller should fall through
+        to the normal alert email path).
+        """
+        if not self.is_all_clear(results):
+            logger.info(
+                "Results contain actions or errors. Skipping all-clear email; "
+                "normal alert path should handle notification."
+            )
+            return False
+
+        if not self.is_configured:
+            logger.warning("SMTP settings not configured. All-clear email skipped.")
+            return False
+
+        subject = "✅ Sunday All Clear — All Starters Active"
+
+        msg = email.message.EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = self.email_from
+        msg["To"] = self.email_to
+
+        text_content = self.build_all_clear_text_report(results)
+        html_content = self.build_all_clear_html_report(results)
+
+        msg.set_content(text_content)
+        msg.add_alternative(html_content, subtype="html")
+
+        try:
+            logger.info(f"Connecting to SMTP server {self.smtp_host}:{self.smtp_port}...")
+            with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=15) as server:
+                if self.use_tls:
+                    server.starttls()
+                if self.smtp_user and self.smtp_password:
+                    server.login(self.smtp_user, self.smtp_password)
+                server.send_message(msg)
+            logger.info(f"✅ All-clear notification successfully emailed to {self.email_to}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send all-clear email: {e}", exc_info=True)
+            return False
 
     def send_summary(
         self,
@@ -257,3 +448,4 @@ class EmailNotifier:
         except Exception as e:
             logger.error(f"Failed to send email notification: {e}", exc_info=True)
             return False
+
