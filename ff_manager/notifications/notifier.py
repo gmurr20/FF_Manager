@@ -1,99 +1,49 @@
-import email.message
 import logging
-import smtplib
-import socket
+import os
 from typing import List, Optional
 
+from ff_manager.interfaces import EmailClient
 from ff_manager.models import ActionResult, SwapDecision
+from ff_manager.notifications.backends import ResendEmailClient
 
 logger = logging.getLogger(__name__)
 
 
-def _create_ipv4_connection(
-    address,
-    timeout: Optional[float] = 15,
-    source_address=None,
-):
-    """
-    Connect to (host, port) forcing IPv4 (socket.AF_INET).
-
-    Prevents '[Errno 101] Network is unreachable' on container platforms like Railway
-    where IPv6 DNS resolution succeeds but outbound IPv6 routing is disabled/unavailable.
-    """
-    host, port = address
-    exceptions = []
-    try:
-        addr_entries = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-    except socket.error as e:
-        logger.warning(
-            f"IPv4 getaddrinfo failed for {host}:{port}: {e}. Falling back to default socket.create_connection."
-        )
-        return socket.create_connection(address, timeout, source_address)
-
-    for res in addr_entries:
-        af, socktype, proto, canonname, sa = res
-        sock = None
-        try:
-            sock = socket.socket(af, socktype, proto)
-            if timeout is not None:
-                sock.settimeout(timeout)
-            if source_address:
-                sock.bind(source_address)
-            sock.connect(sa)
-            return sock
-        except socket.error as exc:
-            exceptions.append(exc)
-            if sock is not None:
-                sock.close()
-
-    if exceptions:
-        raise exceptions[-1]
-    return socket.create_connection(address, timeout, source_address)
-
-
-class IPv4SMTP(smtplib.SMTP):
-    """SMTP client that forces IPv4 socket connection."""
-
-    def _get_socket(self, host, port, timeout):
-        if timeout is not None and not timeout:
-            raise ValueError("Non-blocking socket (timeout=0) is not supported")
-        return _create_ipv4_connection((host, port), timeout, self.source_address)
-
-
-class IPv4SMTP_SSL(smtplib.SMTP_SSL):
-    """SMTP_SSL client that forces IPv4 socket connection and wraps with SSL."""
-
-    def _get_socket(self, host, port, timeout):
-        new_socket = _create_ipv4_connection((host, port), timeout, self.source_address)
-        new_socket = self.context.wrap_socket(new_socket, server_hostname=self._host)
-        return new_socket
-
-
 class EmailNotifier:
-    """Compiles execution action logs into clean HTML/Text email summaries."""
+    """Compiles execution action logs into clean HTML/Text email summaries and dispatches via an EmailClient."""
 
     def __init__(
         self,
-        smtp_host: Optional[str] = None,
-        smtp_port: int = 587,
-        smtp_user: Optional[str] = None,
-        smtp_password: Optional[str] = None,
+        client: Optional[EmailClient] = None,
         email_to: Optional[str] = None,
         email_from: Optional[str] = None,
-        use_tls: bool = True,
+        api_key: Optional[str] = None,
+        # Legacy parameters retained for gentle backward compatibility if passed as kwargs
+        **kwargs,
     ):
-        self.smtp_host = smtp_host
-        self.smtp_port = smtp_port
-        self.smtp_user = smtp_user
-        self.smtp_password = smtp_password
-        self.email_to = email_to
-        self.email_from = email_from or smtp_user
-        self.use_tls = use_tls
+        if client is not None:
+            self.client = client
+        else:
+            self.client = ResendEmailClient(
+                api_key=api_key or os.environ.get("RESEND_API_KEY"),
+                default_from=email_from,
+            )
+        self.email_to = (
+            email_to
+            or os.environ.get("NOTIFICATION_EMAIL_TO")
+            or os.environ.get("RESEND_TO_EMAIL")
+        )
+        self.email_from = (
+            email_from
+            or getattr(self.client, "default_from", None)
+            or os.environ.get("NOTIFICATION_EMAIL_FROM")
+            or "onboarding@resend.dev"
+        )
 
     @property
     def is_configured(self) -> bool:
-        """Check if SMTP credentials and recipients are fully configured."""
-        return bool(self.smtp_host and self.smtp_user and self.smtp_password and self.email_to)
+        """Check if email backend and recipient are configured."""
+        return bool(self.client and self.client.is_configured and self.email_to)
 
     def should_send_email(self, results: List[ActionResult]) -> bool:
         """
@@ -419,12 +369,6 @@ class EmailNotifier:
         """
         return html
 
-    def _create_smtp_client(self):
-        """Instantiate appropriate IPv4-preferred SMTP or SMTP_SSL client based on port."""
-        if self.smtp_port == 465:
-            return IPv4SMTP_SSL(self.smtp_host, self.smtp_port, timeout=15)
-        return IPv4SMTP(self.smtp_host, self.smtp_port, timeout=15)
-
     def send_all_clear(self, results: List[ActionResult]) -> bool:
         """
         Send the Sunday "all clear" heartbeat email.
@@ -441,35 +385,23 @@ class EmailNotifier:
             return False
 
         if not self.is_configured:
-            logger.warning("SMTP settings not configured. All-clear email skipped.")
+            logger.warning("Email client not configured. All-clear email skipped.")
             return False
 
         subject = "✅ Sunday All Clear — All Starters Active"
-
-        msg = email.message.EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = self.email_from
-        msg["To"] = self.email_to
-
         text_content = self.build_all_clear_text_report(results)
         html_content = self.build_all_clear_html_report(results)
 
-        msg.set_content(text_content)
-        msg.add_alternative(html_content, subtype="html")
-
-        try:
-            logger.info(f"Connecting to SMTP server {self.smtp_host}:{self.smtp_port}...")
-            with self._create_smtp_client() as server:
-                if self.use_tls and self.smtp_port != 465:
-                    server.starttls()
-                if self.smtp_user and self.smtp_password:
-                    server.login(self.smtp_user, self.smtp_password)
-                server.send_message(msg)
+        sent = self.client.send_email(
+            to=self.email_to,
+            subject=subject,
+            html_content=html_content,
+            text_content=text_content,
+            from_email=self.email_from,
+        )
+        if sent:
             logger.info(f"✅ All-clear notification successfully emailed to {self.email_to}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send all-clear email: {e}", exc_info=True)
-            return False
+        return sent
 
     def send_summary(
         self,
@@ -488,7 +420,7 @@ class EmailNotifier:
             return True
 
         if not self.is_configured:
-            logger.warning("SMTP settings not configured. Notification email skipped.")
+            logger.warning("Email client not configured. Notification email skipped.")
             return False
 
         subject = "🏈 Fantasy Lineup Auto-Manager Action Report"
@@ -502,28 +434,17 @@ class EmailNotifier:
         if dry_run:
             subject = f"[DRY RUN] {subject}"
 
-        msg = email.message.EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = self.email_from
-        msg["To"] = self.email_to
-
         text_content = self.build_text_report(results)
         html_content = self.build_html_report(results)
 
-        msg.set_content(text_content)
-        msg.add_alternative(html_content, subtype="html")
-
-        try:
-            logger.info(f"Connecting to SMTP server {self.smtp_host}:{self.smtp_port}...")
-            with self._create_smtp_client() as server:
-                if self.use_tls and self.smtp_port != 465:
-                    server.starttls()
-                if self.smtp_user and self.smtp_password:
-                    server.login(self.smtp_user, self.smtp_password)
-                server.send_message(msg)
+        sent = self.client.send_email(
+            to=self.email_to,
+            subject=subject,
+            html_content=html_content,
+            text_content=text_content,
+            from_email=self.email_from,
+        )
+        if sent:
             logger.info(f"Summary notification successfully emailed to {self.email_to}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send email notification: {e}", exc_info=True)
-            return False
+        return sent
 

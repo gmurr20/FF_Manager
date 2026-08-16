@@ -1,18 +1,122 @@
-"""Unit tests for EmailNotifier using standard unittest."""
+"""Unit tests for ResendEmailClient and EmailNotifier."""
 
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
+import resend.exceptions
+
+from ff_manager.interfaces import EmailClient
 from ff_manager.models import ActionResult, Player, SwapDecision
+from ff_manager.notifications.backends import ResendEmailClient
 from ff_manager.notifications.notifier import EmailNotifier
 
 
+class TestResendEmailClient(unittest.TestCase):
+    """Tests for ResendEmailClient delivery backend."""
+
+    def test_is_configured_true_when_api_key_set(self):
+        client = ResendEmailClient(api_key="re_123456")
+        self.assertTrue(client.is_configured)
+
+    def test_is_configured_false_when_no_api_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            client = ResendEmailClient(api_key=None)
+            self.assertFalse(client.is_configured)
+
+    @patch("resend.Emails.send")
+    def test_send_email_success(self, mock_send):
+        mock_send.return_value = {"id": "msg_abc123"}
+        client = ResendEmailClient(api_key="re_test_key", default_from="bot@test.com")
+
+        sent = client.send_email(
+            to="user@example.com",
+            subject="Test Subject",
+            html_content="<p>Hello</p>",
+            text_content="Hello",
+        )
+
+        self.assertTrue(sent)
+        mock_send.assert_called_once_with(
+            {
+                "from": "bot@test.com",
+                "to": ["user@example.com"],
+                "subject": "Test Subject",
+                "html": "<p>Hello</p>",
+                "text": "Hello",
+            }
+        )
+
+    @patch("resend.Emails.send")
+    def test_send_email_with_multiple_recipients_and_custom_from(self, mock_send):
+        mock_send.return_value = {"id": "msg_xyz789"}
+        client = ResendEmailClient(api_key="re_test_key", default_from="default@test.com")
+
+        sent = client.send_email(
+            to=["user1@example.com", "user2@example.com"],
+            subject="Multi Alert",
+            html_content="<p>Alert</p>",
+            from_email="custom@test.com",
+        )
+
+        self.assertTrue(sent)
+        mock_send.assert_called_once_with(
+            {
+                "from": "custom@test.com",
+                "to": ["user1@example.com", "user2@example.com"],
+                "subject": "Multi Alert",
+                "html": "<p>Alert</p>",
+            }
+        )
+
+    def test_send_email_skipped_when_unconfigured(self):
+        with patch.dict(os.environ, {}, clear=True):
+            client = ResendEmailClient(api_key=None)
+            sent = client.send_email(
+                to="user@example.com",
+                subject="Test",
+                html_content="<p>Test</p>",
+            )
+            self.assertFalse(sent)
+
+    @patch("resend.Emails.send")
+    def test_send_email_handles_resend_error(self, mock_send):
+        mock_send.side_effect = resend.exceptions.ResendError(
+            code=401,
+            error_type="invalid_api_key",
+            message="Invalid API Key",
+            suggested_action="Please provide a valid API key.",
+        )
+        client = ResendEmailClient(api_key="re_invalid")
+
+        sent = client.send_email(
+            to="user@example.com",
+            subject="Test",
+            html_content="<p>Test</p>",
+        )
+
+        self.assertFalse(sent)
+
+    @patch("resend.Emails.send")
+    def test_send_email_handles_generic_exception(self, mock_send):
+        mock_send.side_effect = ConnectionError("Network unreachable")
+        client = ResendEmailClient(api_key="re_test")
+
+        sent = client.send_email(
+            to="user@example.com",
+            subject="Test",
+            html_content="<p>Test</p>",
+        )
+
+        self.assertFalse(sent)
+
+
 class TestEmailNotifier(unittest.TestCase):
+    """Tests for EmailNotifier formatting and dispatching."""
+
     def test_notifier_should_send_email(self):
         notifier = EmailNotifier(
-            smtp_host="smtp.test.com",
-            smtp_user="user@test.com",
-            smtp_password="pwd",
+            api_key="re_test",
             email_to="recipient@test.com",
         )
 
@@ -136,22 +240,18 @@ class TestEmailNotifier(unittest.TestCase):
         ]
 
         html_report = notifier.build_html_report(results)
-        # Header should only appear ONCE despite 2 swaps
         self.assertEqual(html_report.count("Sleeper - ILLest League - Ben Johnson Glazer"), 1)
         self.assertIn("WR: P1 (Out): 0", html_report)
         self.assertIn("QB: P3 (Out): 0", html_report)
 
-    @patch("ff_manager.notifications.notifier.IPv4SMTP")
-    def test_send_summary_smtp(self, mock_smtp_class):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__.return_value = mock_server
+    @patch("resend.Emails.send")
+    def test_send_summary_with_resend(self, mock_send):
+        mock_send.return_value = {"id": "msg_summary123"}
 
         notifier = EmailNotifier(
-            smtp_host="smtp.gmail.com",
-            smtp_port=587,
-            smtp_user="me@gmail.com",
-            smtp_password="password",
+            api_key="re_test_key",
             email_to="me@gmail.com",
+            email_from="bot@domain.com",
         )
 
         swap = SwapDecision(
@@ -175,28 +275,27 @@ class TestEmailNotifier(unittest.TestCase):
 
         sent = notifier.send_summary(results)
         self.assertTrue(sent)
-        mock_server.starttls.assert_called_once()
-        mock_server.login.assert_called_once_with("me@gmail.com", "password")
-        mock_server.send_message.assert_called_once()
+        mock_send.assert_called_once()
+        params = mock_send.call_args[0][0]
+        self.assertEqual(params["to"], ["me@gmail.com"])
+        self.assertEqual(params["from"], "bot@domain.com")
+        self.assertIn("Fantasy Lineup Auto-Manager Action Report", params["subject"])
 
-    @patch("ff_manager.notifications.notifier.IPv4SMTP")
-    def test_send_summary_dry_run_and_force(self, mock_smtp_class):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__.return_value = mock_server
+    @patch("resend.Emails.send")
+    def test_send_summary_dry_run_and_force(self, mock_send):
+        mock_send.return_value = {"id": "msg_dry123"}
 
         notifier = EmailNotifier(
-            smtp_host="smtp.gmail.com",
-            smtp_port=587,
-            smtp_user="me@gmail.com",
-            smtp_password="password",
+            api_key="re_test_key",
             email_to="me@gmail.com",
+            email_from="bot@domain.com",
         )
 
         sent = notifier.send_summary(results=[], force=True, dry_run=True)
         self.assertTrue(sent)
-        mock_server.send_message.assert_called_once()
-        sent_msg = mock_server.send_message.call_args[0][0]
-        self.assertTrue(sent_msg["Subject"].startswith("[DRY RUN]"))
+        mock_send.assert_called_once()
+        params = mock_send.call_args[0][0]
+        self.assertTrue(params["subject"].startswith("[DRY RUN]"))
 
     def test_is_all_clear_with_healthy_results(self):
         notifier = EmailNotifier()
@@ -285,18 +384,17 @@ class TestEmailNotifier(unittest.TestCase):
         html = notifier.build_all_clear_html_report(results)
         self.assertIn("Sunday All Clear", html)
         self.assertIn("ESPN - Champions League - Top Dogs", html)
-        self.assertIn("#22c55e", html)  # Green accent color
+        self.assertIn("#22c55e", html)
         self.assertIn("Enjoy the games!", html)
 
-    @patch("ff_manager.notifications.notifier.IPv4SMTP")
-    def test_send_all_clear_sends_when_healthy(self, mock_smtp_class):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__.return_value = mock_server
+    @patch("resend.Emails.send")
+    def test_send_all_clear_sends_when_healthy(self, mock_send):
+        mock_send.return_value = {"id": "msg_all_clear123"}
 
         notifier = EmailNotifier(
-            smtp_host="smtp.gmail.com", smtp_port=587,
-            smtp_user="me@gmail.com", smtp_password="password",
+            api_key="re_test_key",
             email_to="me@gmail.com",
+            email_from="bot@domain.com",
         )
         results = [
             ActionResult(
@@ -307,19 +405,16 @@ class TestEmailNotifier(unittest.TestCase):
         ]
         sent = notifier.send_all_clear(results)
         self.assertTrue(sent)
-        mock_server.send_message.assert_called_once()
-        sent_msg = mock_server.send_message.call_args[0][0]
-        self.assertIn("All Clear", sent_msg["Subject"])
+        mock_send.assert_called_once()
+        params = mock_send.call_args[0][0]
+        self.assertIn("All Clear", params["subject"])
 
-    @patch("ff_manager.notifications.notifier.IPv4SMTP")
-    def test_send_all_clear_skips_when_problems_exist(self, mock_smtp_class):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__.return_value = mock_server
-
+    @patch("resend.Emails.send")
+    def test_send_all_clear_skips_when_problems_exist(self, mock_send):
         notifier = EmailNotifier(
-            smtp_host="smtp.gmail.com", smtp_port=587,
-            smtp_user="me@gmail.com", smtp_password="password",
+            api_key="re_test_key",
             email_to="me@gmail.com",
+            email_from="bot@domain.com",
         )
         results = [
             ActionResult(
@@ -330,13 +425,11 @@ class TestEmailNotifier(unittest.TestCase):
         ]
         sent = notifier.send_all_clear(results)
         self.assertFalse(sent)
-        mock_server.send_message.assert_not_called()
+        mock_send.assert_not_called()
 
     def test_notifier_should_send_email_on_empty_slot_no_replacement(self):
         notifier = EmailNotifier(
-            smtp_host="smtp.test.com",
-            smtp_user="user@test.com",
-            smtp_password="pwd",
+            api_key="re_test_key",
             email_to="recipient@test.com",
         )
         results = [
@@ -354,9 +447,7 @@ class TestEmailNotifier(unittest.TestCase):
 
     def test_notifier_should_send_email_on_locked_starter_error(self):
         notifier = EmailNotifier(
-            smtp_host="smtp.test.com",
-            smtp_user="user@test.com",
-            smtp_password="pwd",
+            api_key="re_test_key",
             email_to="recipient@test.com",
         )
         results = [
@@ -374,17 +465,14 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertTrue(notifier.should_send_email(results))
         self.assertFalse(notifier.is_all_clear(results))
 
-    @patch("ff_manager.notifications.notifier.IPv4SMTP")
-    def test_send_summary_sends_alert_on_no_replacement(self, mock_smtp_class):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__.return_value = mock_server
+    @patch("resend.Emails.send")
+    def test_send_summary_sends_alert_on_no_replacement(self, mock_send):
+        mock_send.return_value = {"id": "msg_alert123"}
 
         notifier = EmailNotifier(
-            smtp_host="smtp.gmail.com",
-            smtp_port=587,
-            smtp_user="me@gmail.com",
-            smtp_password="password",
+            api_key="re_test_key",
             email_to="me@gmail.com",
+            email_from="bot@domain.com",
         )
         results = [
             ActionResult(
@@ -399,27 +487,28 @@ class TestEmailNotifier(unittest.TestCase):
         ]
         sent = notifier.send_summary(results)
         self.assertTrue(sent)
-        mock_server.send_message.assert_called_once()
-        sent_msg = mock_server.send_message.call_args[0][0]
-        self.assertIn("Action/Alert", sent_msg["Subject"])
+        mock_send.assert_called_once()
+        params = mock_send.call_args[0][0]
+        self.assertIn("Action/Alert", params["subject"])
 
-    @patch("ff_manager.notifications.notifier.IPv4SMTP_SSL")
-    def test_send_summary_ssl_port_465(self, mock_ssl_class):
-        mock_server = MagicMock()
-        mock_ssl_class.return_value.__enter__.return_value = mock_server
+    def test_custom_email_client_injection(self):
+        """Verify that any custom EmailClient backend can be injected and used seamlessly."""
+        mock_client = MagicMock(spec=EmailClient)
+        mock_client.is_configured = True
+        mock_client.send_email.return_value = True
 
         notifier = EmailNotifier(
-            smtp_host="smtp.gmail.com",
-            smtp_port=465,
-            smtp_user="me@gmail.com",
-            smtp_password="password",
-            email_to="me@gmail.com",
+            client=mock_client,
+            email_to="custom@test.com",
+            email_from="custom_sender@test.com",
         )
+
+        self.assertTrue(notifier.is_configured)
         results = [
             ActionResult(
                 league_id="1",
                 league_name="L1",
-                platform="Sleeper",
+                platform="ESPN",
                 team_id="T1",
                 team_name="Team 1",
                 status="SUCCESS",
@@ -432,13 +521,13 @@ class TestEmailNotifier(unittest.TestCase):
                 ),
             )
         ]
+
         sent = notifier.send_summary(results)
         self.assertTrue(sent)
-        mock_ssl_class.assert_called_once_with("smtp.gmail.com", 465, timeout=15)
-        # Port 465 SSL connects directly without starttls()
-        mock_server.starttls.assert_not_called()
-        mock_server.login.assert_called_once_with("me@gmail.com", "password")
-        mock_server.send_message.assert_called_once()
+        mock_client.send_email.assert_called_once()
+        kwargs = mock_client.send_email.call_args[1]
+        self.assertEqual(kwargs["to"], "custom@test.com")
+        self.assertEqual(kwargs["from_email"], "custom_sender@test.com")
 
 
 if __name__ == "__main__":

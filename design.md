@@ -41,7 +41,7 @@ The agent must implement strict conditional logic. An active starter should **ON
 - **Logging requirements:**
   - Record successful swaps (e.g., *"ESPN League: Swapped OUT [Player A] for [Player B] (Proj: 12.4)"*).
   - Record exceptions/failures (e.g., *"Sleeper League 3: No valid bench replacement found for [Player C]"* or *"Auth Token Expired"*).
-- **Email Delivery:** Implement an `smtplib` function that compiles the `ActionLog` into a clean HTML/Text summary and emails it to the user. Skip the email if no swaps were made and no errors occurred.
+- **Email Delivery:** Implement an `EmailNotifier` delegating to an extensible `EmailClient` backend (defaulting to the `ResendEmailClient` using the official Resend Python SDK) that compiles the `ActionLog` into a clean HTML/Text summary and emails it to the user. Skip the email if no swaps were made and no errors occurred.
 
 ## 4. Deployment & Infrastructure Target
 - **Containerization:** The script must include a `Dockerfile` for standardized execution.

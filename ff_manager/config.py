@@ -51,16 +51,14 @@ class Config:
         default_factory=lambda: _get_env_list("SLEEPER_LEAGUE_IDS")
     )
 
-    # Email / Notification Configuration
-    smtp_host: Optional[str] = field(default_factory=lambda: os.getenv("SMTP_HOST"))
-    smtp_port: int = field(
-        default_factory=lambda: int(os.getenv("SMTP_PORT", "587"))
+    # Email / Notification Configuration (Resend API)
+    resend_api_key: Optional[str] = field(default_factory=lambda: os.getenv("RESEND_API_KEY"))
+    email_to: Optional[str] = field(
+        default_factory=lambda: os.getenv("NOTIFICATION_EMAIL_TO") or os.getenv("RESEND_TO_EMAIL")
     )
-    smtp_user: Optional[str] = field(default_factory=lambda: os.getenv("SMTP_USER"))
-    smtp_password: Optional[str] = field(default_factory=lambda: os.getenv("SMTP_PASSWORD"))
-    email_to: Optional[str] = field(default_factory=lambda: os.getenv("NOTIFICATION_EMAIL_TO"))
     email_from: Optional[str] = field(
         default_factory=lambda: os.getenv("NOTIFICATION_EMAIL_FROM")
+        or os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
     )
     force_email: bool = field(
         default_factory=lambda: os.getenv("FORCE_EMAIL", "false").lower() in ("true", "1", "yes")

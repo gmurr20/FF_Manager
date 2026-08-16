@@ -64,3 +64,37 @@ class FantasyPlatformClient(ABC):
             True if credentials are valid and platform is reachable.
         """
         pass
+
+
+class EmailClient(ABC):
+    """Abstract Base Class for email delivery backends (Resend, SendGrid, Postmark, etc.)."""
+
+    @property
+    @abstractmethod
+    def is_configured(self) -> bool:
+        """Return True if backend credentials and configuration are present."""
+        pass
+
+    @abstractmethod
+    def send_email(
+        self,
+        to: str | List[str],
+        subject: str,
+        html_content: str,
+        text_content: Optional[str] = None,
+        from_email: Optional[str] = None,
+    ) -> bool:
+        """
+        Send an email via this delivery backend.
+
+        Args:
+            to: Recipient email address or list of recipient email addresses.
+            subject: Email subject line.
+            html_content: Rendered HTML body content.
+            text_content: Optional plain-text fallback body content.
+            from_email: Optional sender address override.
+
+        Returns:
+            True if the email was sent successfully, False otherwise.
+        """
+        pass

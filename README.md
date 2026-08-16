@@ -12,7 +12,7 @@ A headless Python automation tool that manages fantasy football lineups across E
   - Automatically selects the eligible candidate with the highest projected points.
   - Prevents multi-swap collisions (never duplicates a bench player across multiple starter slots).
 - **ESPN & Sleeper Integrations**: Seamless adapters for both ESPN and Sleeper leagues.
-- **Email Notifications**: Summarizes all executed swaps, warnings, and errors in formatted HTML/Text emails via SMTP.
+- **Email Notifications**: Summarizes all executed swaps, warnings, and errors in formatted HTML/Text emails via HTTP-based delivery (Resend API) with swappable backend architecture.
 - **Safe Simulation (`--dry-run`)**: Test and verify lineup swap evaluations without mutating live lineups.
 - **Production Ready**: Containerized with `Dockerfile` for deployment on Railway or cron workers.
 
@@ -24,13 +24,14 @@ A headless Python automation tool that manages fantasy football lineups across E
 ff_manager/
 ├── config.py                 # Configuration loader (.env, env variables)
 ├── models.py                 # Unified domain models (Player, Roster, SwapDecision, ActionResult)
-├── interfaces.py             # Abstract base class (FantasyPlatformClient)
+├── interfaces.py             # Abstract base classes (FantasyPlatformClient, EmailClient)
 ├── core/
 │   └── lineup_manager.py     # Platform-agnostic lineup evaluation & swap engine
 ├── platforms/
 │   ├── espn.py               # ESPN platform adapter
 │   └── sleeper.py            # Sleeper platform adapter
 ├── notifications/
+│   ├── backends.py           # Email delivery backends (ResendEmailClient)
 │   └── notifier.py           # Email notification formatting and delivery
 └── main.py                   # CLI orchestrator and entry point
 ```
@@ -55,7 +56,7 @@ cp .env.example .env
 Key environment variables:
 - **ESPN**: `ESPN_S2`, `ESPN_SWID`, `ESPN_LEAGUE_IDS`
 - **Sleeper**: `SLEEPER_USER_ID`, `SLEEPER_TOKEN`, `SLEEPER_LEAGUE_IDS`
-- **Notifications**: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `NOTIFICATION_EMAIL_TO`
+- **Notifications**: `RESEND_API_KEY`, `NOTIFICATION_EMAIL_TO`, `NOTIFICATION_EMAIL_FROM`
 
 ### 3. Usage
 

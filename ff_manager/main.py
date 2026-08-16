@@ -17,7 +17,7 @@ from ff_manager.db import (
     save_fingerprint,
 )
 from ff_manager.models import ActionResult
-from ff_manager.notifications.notifier import EmailNotifier
+from ff_manager.notifications import EmailNotifier, ResendEmailClient
 from ff_manager.platforms.espn import ESPNAdapter
 from ff_manager.platforms.sleeper import SleeperAdapter
 
@@ -158,11 +158,12 @@ def run() -> int:
     # ----------------------------------------------------
     # 3. Notification and Summary Reporting
     # ----------------------------------------------------
+    email_client = ResendEmailClient(
+        api_key=config.resend_api_key,
+        default_from=config.email_from,
+    )
     notifier = EmailNotifier(
-        smtp_host=config.smtp_host,
-        smtp_port=config.smtp_port,
-        smtp_user=config.smtp_user,
-        smtp_password=config.smtp_password,
+        client=email_client,
         email_to=config.email_to,
         email_from=config.email_from,
     )
