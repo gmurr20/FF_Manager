@@ -251,7 +251,12 @@ class SleeperAdapter(FantasyPlatformClient):
 
         # 4. Fetch projections / matchups for the current week using league scoring settings
         nfl_state = self.get_nfl_state()
-        current_week = nfl_state.get("week", 1)
+        season_type = nfl_state.get("season_type", "regular")
+        if season_type == "pre":
+            current_week = league_data.get("settings", {}).get("start_week", 1)
+        else:
+            current_week = nfl_state.get("week", 1)
+
         scoring_settings = league_data.get("scoring_settings", {})
         projections_map = self._fetch_weekly_projections(
             league_id=league_id,
@@ -599,7 +604,16 @@ class SleeperAdapter(FantasyPlatformClient):
         self.last_error = None
 
         nfl_state = self.get_nfl_state()
-        current_week = nfl_state.get("week", 1)
+        season_type = nfl_state.get("season_type", "regular")
+        if season_type == "pre":
+            try:
+                league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
+                l_resp = self.session.get(league_url, headers=self._get_headers(), timeout=10)
+                current_week = l_resp.json().get("settings", {}).get("start_week", 1) if l_resp.status_code == 200 else 1
+            except Exception:
+                current_week = 1
+        else:
+            current_week = nfl_state.get("week", 1)
 
         # Primary: Sleeper GraphQL mutation (matchup leg for active week + base roster)
         try:
