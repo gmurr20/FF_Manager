@@ -132,6 +132,7 @@ class LineupManager:
                         team_name=roster.team_name,
                         status="SKIPPED",
                         message=f"Starter {starter.name} ({starter.position}) is locked ({reason}).",
+                        error=f"Starter {starter.name} is locked and cannot be swapped ({reason}).",
                     )
                 )
                 continue

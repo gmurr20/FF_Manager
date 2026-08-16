@@ -184,7 +184,10 @@ def run() -> int:
             print("-" * 60)
             print(notifier.build_all_clear_text_report(all_results))
         else:
-            has_errors = any(r.error or r.status.upper() in ("FAILED", "NO_REPLACEMENT") for r in all_results)
+            has_errors = any(
+                bool(r.error) or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+                for r in all_results
+            )
             subject = "⚠️ [Action/Alert] Fantasy Lineup Auto-Manager Report" if has_errors else "🏈 Fantasy Lineup Auto-Manager Action Report"
             if dry_run:
                 subject = f"[DRY RUN] {subject}"

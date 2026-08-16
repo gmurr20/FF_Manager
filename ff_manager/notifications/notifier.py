@@ -260,12 +260,22 @@ class EmailNotifier:
     def is_all_clear(self, results: List[ActionResult]) -> bool:
         """
         Determine if all results represent a clean, healthy state.
-        Returns True only when every result is NO_ACTION_NEEDED or SKIPPED (pre-draft).
+        Returns True only when every result is NO_ACTION_NEEDED or pre-draft SKIPPED without errors.
         """
         if not results:
             return False
-        return all(
-            r.status.upper() in ("NO_ACTION_NEEDED", "SKIPPED") for r in results
+        return (
+            all(
+                r.status.upper() == "NO_ACTION_NEEDED"
+                or (r.status.upper() == "SKIPPED" and "pre-draft" in r.message.lower())
+                for r in results
+            )
+            and not any(
+                bool(r.error)
+                or r.swap is not None
+                or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+                for r in results
+            )
         )
 
     def build_all_clear_text_report(self, results: List[ActionResult]) -> str:
@@ -409,7 +419,7 @@ class EmailNotifier:
             True if email was sent or skipped legitimately, False if sending failed.
         """
         if not self.should_send_email(results) and not force:
-            logger.info("No roster changes made. Skipping notification email.")
+            logger.info("No roster changes or actionable alerts. Skipping notification email.")
             return True
 
         if not self.is_configured:
@@ -417,7 +427,10 @@ class EmailNotifier:
             return False
 
         subject = "🏈 Fantasy Lineup Auto-Manager Action Report"
-        has_errors = any(r.error or r.status.upper() in ("FAILED", "NO_REPLACEMENT") for r in results)
+        has_errors = any(
+            bool(r.error) or r.status.upper() in ("FAILED", "ERROR", "NO_REPLACEMENT")
+            for r in results
+        )
         if has_errors:
             subject = "⚠️ [Action/Alert] Fantasy Lineup Auto-Manager Report"
 

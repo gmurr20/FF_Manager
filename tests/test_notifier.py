@@ -332,6 +332,77 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertFalse(sent)
         mock_server.send_message.assert_not_called()
 
+    def test_notifier_should_send_email_on_empty_slot_no_replacement(self):
+        notifier = EmailNotifier(
+            smtp_host="smtp.test.com",
+            smtp_user="user@test.com",
+            smtp_password="pwd",
+            email_to="recipient@test.com",
+        )
+        results = [
+            ActionResult(
+                league_id="s3",
+                league_name="Shadynasty",
+                platform="Sleeper",
+                team_id="t3",
+                team_name="Team 3",
+                status="NO_REPLACEMENT",
+                message="No valid bench replacement found for [Empty K] (K, Slot: K, Empty starting slot).",
+            )
+        ]
+        self.assertTrue(notifier.should_send_email(results))
+
+    def test_notifier_should_send_email_on_locked_starter_error(self):
+        notifier = EmailNotifier(
+            smtp_host="smtp.test.com",
+            smtp_user="user@test.com",
+            smtp_password="pwd",
+            email_to="recipient@test.com",
+        )
+        results = [
+            ActionResult(
+                league_id="1",
+                league_name="L1",
+                platform="Sleeper",
+                team_id="T1",
+                team_name="Team 1",
+                status="SKIPPED",
+                message="Starter Keenan Allen (WR) is locked (Injury: OUT).",
+                error="Starter Keenan Allen is locked and cannot be swapped (Injury: OUT).",
+            )
+        ]
+        self.assertTrue(notifier.should_send_email(results))
+        self.assertFalse(notifier.is_all_clear(results))
+
+    @patch("smtplib.SMTP")
+    def test_send_summary_sends_alert_on_no_replacement(self, mock_smtp_class):
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        notifier = EmailNotifier(
+            smtp_host="smtp.gmail.com",
+            smtp_port=587,
+            smtp_user="me@gmail.com",
+            smtp_password="password",
+            email_to="me@gmail.com",
+        )
+        results = [
+            ActionResult(
+                league_id="s3",
+                league_name="Shadynasty",
+                platform="Sleeper",
+                team_id="t3",
+                team_name="Team 3",
+                status="NO_REPLACEMENT",
+                message="No valid bench replacement found for [Empty K] (K, Slot: K, Empty starting slot).",
+            )
+        ]
+        sent = notifier.send_summary(results)
+        self.assertTrue(sent)
+        mock_server.send_message.assert_called_once()
+        sent_msg = mock_server.send_message.call_args[0][0]
+        self.assertIn("Action/Alert", sent_msg["Subject"])
+
 
 if __name__ == "__main__":
     unittest.main()
