@@ -10,6 +10,12 @@ try:
 except ImportError:
     requests = None
 
+from ff_manager.http import (
+    DEFAULT_BACKOFF_FACTOR,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
+    request_with_retry,
+)
 from ff_manager.interfaces import FantasyPlatformClient
 from ff_manager.models import Player, Roster, SwapDecision
 
@@ -28,6 +34,9 @@ class SleeperAdapter(FantasyPlatformClient):
         user_id: Optional[str] = None,
         year: Optional[int] = None,
         session: Optional[Any] = None,
+        timeout: int = DEFAULT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
     ):
         """
         Initialize the Sleeper adapter.
@@ -37,11 +46,17 @@ class SleeperAdapter(FantasyPlatformClient):
             user_id: Sleeper user ID or username.
             year: NFL season year (defaults to current year).
             session: Optional requests.Session instance for testing/mocking.
+            timeout: Default request timeout in seconds.
+            max_retries: Total number of attempts for retryable requests.
+            backoff_factor: Base multiplier for exponential backoff delay.
         """
         self.auth_token = auth_token
         self.user_id = user_id
         self._resolved_user_id: Optional[str] = None
         self.year = year or datetime.date.today().year
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
         if session is not None:
             self.session = session
         elif requests is not None:
@@ -53,6 +68,32 @@ class SleeperAdapter(FantasyPlatformClient):
         self._nfl_state_cache: Optional[Dict[str, Any]] = None
         self._active_roster_starters: Dict[str, List[str]] = {}
         self.last_error: Optional[str] = None
+
+    def _get(self, url: str, timeout: Optional[int] = None, **kwargs) -> Any:
+        """Issue a GET request with retry logic."""
+        return request_with_retry(
+            session=self.session,
+            method="GET",
+            url=url,
+            timeout=timeout or self.timeout,
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            platform_name=self.platform_name,
+            **kwargs,
+        )
+
+    def _post(self, url: str, timeout: Optional[int] = None, **kwargs) -> Any:
+        """Issue a POST request with retry logic."""
+        return request_with_retry(
+            session=self.session,
+            method="POST",
+            url=url,
+            timeout=timeout or self.timeout,
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            platform_name=self.platform_name,
+            **kwargs,
+        )
 
     @property
     def platform_name(self) -> str:
@@ -70,7 +111,7 @@ class SleeperAdapter(FantasyPlatformClient):
 
         if self.session is not None:
             try:
-                user_resp = self.session.get(f"{SLEEPER_API_BASE}/user/{self.user_id}", timeout=10)
+                user_resp = self._get(f"{SLEEPER_API_BASE}/user/{self.user_id}")
                 if user_resp.status_code == 200:
                     self._resolved_user_id = str(user_resp.json().get("user_id", self.user_id))
                     logger.debug(f"[Sleeper] Resolved username '{self.user_id}' to user ID '{self._resolved_user_id}'")
@@ -88,7 +129,7 @@ class SleeperAdapter(FantasyPlatformClient):
         try:
             resolved_uid = self._resolve_user_id()
             url = f"{SLEEPER_API_BASE}/user/{resolved_uid or self.user_id}"
-            resp = self.session.get(url, timeout=10)
+            resp = self._get(url)
             return resp.status_code == 200
         except Exception:
             return False
@@ -111,7 +152,7 @@ class SleeperAdapter(FantasyPlatformClient):
             if self.session is not None:
                 try:
                     url = f"{SLEEPER_API_BASE}/state/nfl"
-                    resp = self.session.get(url, timeout=10)
+                    resp = self._get(url)
                     if resp.status_code == 200:
                         self._nfl_state_cache = resp.json()
                 except Exception as e:
@@ -127,7 +168,7 @@ class SleeperAdapter(FantasyPlatformClient):
                 raise RuntimeError("HTTP session not initialized (requests library required).")
             logger.info("[Sleeper] Fetching NFL players metadata database...")
             url = f"{SLEEPER_API_BASE}/players/nfl"
-            resp = self.session.get(url, timeout=20)
+            resp = self._get(url, timeout=max(self.timeout, 60))
             resp.raise_for_status()
             self._players_cache = resp.json()
             logger.info(f"[Sleeper] Loaded {len(self._players_cache)} players into metadata cache.")
@@ -144,7 +185,7 @@ class SleeperAdapter(FantasyPlatformClient):
 
         resolved_user_id = self._resolve_user_id()
         url = f"{SLEEPER_API_BASE}/user/{resolved_user_id}/leagues/nfl/{self.year}"
-        resp = self.session.get(url, timeout=10)
+        resp = self._get(url)
         if resp.status_code != 200:
             logger.error(f"[Sleeper] Failed to fetch user leagues ({resp.status_code}): {resp.text}")
             return []
@@ -169,7 +210,7 @@ class SleeperAdapter(FantasyPlatformClient):
 
         # 1. Fetch league settings to get roster_positions and league name
         league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
-        league_resp = self.session.get(league_url, headers=self._get_headers(), timeout=10)
+        league_resp = self._get(league_url, headers=self._get_headers())
         league_resp.raise_for_status()
         league_data = league_resp.json()
         league_name = league_data.get("name", f"Sleeper League {league_id}")
@@ -180,7 +221,7 @@ class SleeperAdapter(FantasyPlatformClient):
 
         # 2. Fetch all league rosters
         rosters_url = f"{SLEEPER_API_BASE}/league/{league_id}/rosters"
-        rosters_resp = self.session.get(rosters_url, headers=self._get_headers(), timeout=10)
+        rosters_resp = self._get(rosters_url, headers=self._get_headers())
         rosters_resp.raise_for_status()
         rosters_data = rosters_resp.json()
 
@@ -203,7 +244,7 @@ class SleeperAdapter(FantasyPlatformClient):
         # Fallback: Match via league users list
         if not target_roster and self.user_id:
             try:
-                users_resp = self.session.get(f"{SLEEPER_API_BASE}/league/{league_id}/users", timeout=10)
+                users_resp = self._get(f"{SLEEPER_API_BASE}/league/{league_id}/users")
                 if users_resp.status_code == 200:
                     matched_uid = None
                     target_lower = self.user_id.lower()
@@ -236,7 +277,7 @@ class SleeperAdapter(FantasyPlatformClient):
         # Fetch user team name / users in league for display name
         team_name = f"Team {resolved_roster_id}"
         try:
-            users_resp = self.session.get(f"{SLEEPER_API_BASE}/league/{league_id}/users", timeout=10)
+            users_resp = self._get(f"{SLEEPER_API_BASE}/league/{league_id}/users")
             if users_resp.status_code == 200:
                 for u in users_resp.json():
                     if str(u.get("user_id")) == str(target_roster.get("owner_id")):
@@ -268,7 +309,7 @@ class SleeperAdapter(FantasyPlatformClient):
         matchup_starters = None
         try:
             matchups_url = f"{SLEEPER_API_BASE}/league/{league_id}/matchups/{current_week}"
-            m_resp = self.session.get(matchups_url, headers=self._get_headers(), timeout=10)
+            m_resp = self._get(matchups_url, headers=self._get_headers())
             if m_resp.status_code == 200:
                 for m in m_resp.json() or []:
                     if str(m.get("roster_id")) == resolved_roster_id:
@@ -454,10 +495,9 @@ class SleeperAdapter(FantasyPlatformClient):
         for stype in season_types_to_try:
             try:
                 proj_url = f"https://api.sleeper.app/projections/nfl/{season}/{week}"
-                proj_resp = self.session.get(
+                proj_resp = self._get(
                     proj_url,
                     params={"season_type": stype},
-                    timeout=12,
                 )
                 if proj_resp.status_code == 200:
                     proj_data = proj_resp.json()
@@ -495,7 +535,7 @@ class SleeperAdapter(FantasyPlatformClient):
         if not projections:
             try:
                 url = f"{SLEEPER_API_BASE}/league/{league_id}/matchups/{week}"
-                resp = self.session.get(url, timeout=10)
+                resp = self._get(url)
                 if resp.status_code == 200:
                     matchups = resp.json()
                     for m in matchups:
@@ -542,7 +582,7 @@ class SleeperAdapter(FantasyPlatformClient):
             current_starters = list(self._active_roster_starters[roster_key])
         else:
             rosters_url = f"{SLEEPER_API_BASE}/league/{league_id}/rosters"
-            rosters_resp = self.session.get(rosters_url, headers=self._get_headers(), timeout=10)
+            rosters_resp = self._get(rosters_url, headers=self._get_headers())
             rosters_resp.raise_for_status()
             rosters_data = rosters_resp.json()
 
@@ -564,7 +604,7 @@ class SleeperAdapter(FantasyPlatformClient):
         if swap.starter.is_empty or starter_id not in current_starters:
             # Need to place replacement in an empty slot ('0', '', or unassigned index)
             league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
-            league_resp = self.session.get(league_url, headers=self._get_headers(), timeout=10)
+            league_resp = self._get(league_url, headers=self._get_headers())
             roster_positions = (
                 league_resp.json().get("roster_positions", [])
                 if league_resp.status_code == 200
@@ -608,7 +648,7 @@ class SleeperAdapter(FantasyPlatformClient):
         if season_type == "pre":
             try:
                 league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
-                l_resp = self.session.get(league_url, headers=self._get_headers(), timeout=10)
+                l_resp = self._get(league_url, headers=self._get_headers())
                 current_week = l_resp.json().get("settings", {}).get("start_week", 1) if l_resp.status_code == 200 else 1
             except Exception:
                 current_week = 1
@@ -640,11 +680,10 @@ class SleeperAdapter(FantasyPlatformClient):
                 }}
             }}
             """
-            gql_resp = self.session.post(
+            gql_resp = self._post(
                 SLEEPER_GRAPHQL_URL,
                 json={"query": graphql_query},
                 headers=headers,
-                timeout=10,
             )
             if gql_resp.status_code == 200:
                 data = gql_resp.json()
@@ -691,11 +730,10 @@ class SleeperAdapter(FantasyPlatformClient):
                 }}
             }}
             """
-            gql_resp2 = self.session.post(
+            gql_resp2 = self._post(
                 SLEEPER_GRAPHQL_URL,
                 json={"query": gql_single_query},
                 headers=headers,
-                timeout=10,
             )
             if gql_resp2.status_code == 200:
                 data2 = gql_resp2.json()

@@ -95,6 +95,9 @@ def run() -> int:
                 espn_s2=config.espn_s2,
                 swid=config.espn_swid,
                 year=config.season_year,
+                timeout=config.request_timeout,
+                max_retries=config.max_retries,
+                backoff_factor=config.retry_backoff,
             )
             espn_manager = LineupManager(client=espn_adapter, dry_run=dry_run)
 
@@ -129,6 +132,9 @@ def run() -> int:
                 auth_token=config.sleeper_token,
                 user_id=config.sleeper_user_id,
                 year=config.season_year,
+                timeout=config.request_timeout,
+                max_retries=config.max_retries,
+                backoff_factor=config.retry_backoff,
             )
             sleeper_manager = LineupManager(client=sleeper_adapter, dry_run=dry_run)
 
@@ -208,7 +214,11 @@ def run() -> int:
         if db_conn:
             init_db(db_conn)
 
-    nfl_week = get_nfl_week()
+    nfl_week = get_nfl_week(
+        timeout=config.request_timeout,
+        max_retries=config.max_retries,
+        backoff_factor=config.retry_backoff,
+    )
     fingerprint = compute_fingerprint(all_results, nfl_week)
     logger.info(f"Notification fingerprint: {fingerprint[:12]}... (NFL week: {nfl_week})" if fingerprint else f"No problems to fingerprint (NFL week: {nfl_week})")
 

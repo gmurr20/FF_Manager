@@ -33,6 +33,15 @@ class Config:
     log_level: str = field(
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").upper()
     )
+    request_timeout: int = field(
+        default_factory=lambda: int(os.getenv("REQUEST_TIMEOUT", "30"))
+    )
+    max_retries: int = field(
+        default_factory=lambda: int(os.getenv("MAX_RETRIES", "3"))
+    )
+    retry_backoff: float = field(
+        default_factory=lambda: float(os.getenv("RETRY_BACKOFF", "1.0"))
+    )
 
     # ESPN Configuration
     espn_s2: Optional[str] = field(default_factory=lambda: os.getenv("ESPN_S2"))

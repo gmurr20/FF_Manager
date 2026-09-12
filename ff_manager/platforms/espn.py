@@ -4,6 +4,12 @@ import datetime
 import logging
 from typing import Any, Dict, List, Optional
 
+from ff_manager.http import (
+    DEFAULT_BACKOFF_FACTOR,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
+    request_with_retry,
+)
 from ff_manager.interfaces import FantasyPlatformClient
 from ff_manager.models import Player, Roster, SwapDecision
 
@@ -87,6 +93,9 @@ class ESPNAdapter(FantasyPlatformClient):
         swid: str,
         year: Optional[int] = None,
         session: Optional[Any] = None,
+        timeout: int = DEFAULT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
     ):
         """
         Initialize the ESPN adapter.
@@ -96,6 +105,9 @@ class ESPNAdapter(FantasyPlatformClient):
             swid: SWID cookie value (e.g. '{12345-ABCD-...}').
             year: NFL season year (defaults to current year).
             session: Optional requests.Session instance for testing/mocking.
+            timeout: Default request timeout in seconds.
+            max_retries: Total number of attempts for retryable requests.
+            backoff_factor: Base multiplier for exponential backoff delay.
         """
         self.espn_s2 = espn_s2.strip('"').strip("'") if espn_s2 else ""
         raw_swid = swid.strip('"').strip("'") if swid else ""
@@ -106,6 +118,9 @@ class ESPNAdapter(FantasyPlatformClient):
         self.swid = raw_swid
 
         self.year = year or datetime.date.today().year
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
         if session is not None:
             self.session = session
         elif requests is not None:
@@ -116,6 +131,32 @@ class ESPNAdapter(FantasyPlatformClient):
         self.last_error: Optional[str] = None
         if self.session is not None:
             self._setup_session()
+
+    def _get(self, url: str, timeout: Optional[int] = None, **kwargs) -> Any:
+        """Issue a GET request with retry logic."""
+        return request_with_retry(
+            session=self.session,
+            method="GET",
+            url=url,
+            timeout=timeout or self.timeout,
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            platform_name=self.platform_name,
+            **kwargs,
+        )
+
+    def _post(self, url: str, timeout: Optional[int] = None, **kwargs) -> Any:
+        """Issue a POST request with retry logic."""
+        return request_with_retry(
+            session=self.session,
+            method="POST",
+            url=url,
+            timeout=timeout or self.timeout,
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            platform_name=self.platform_name,
+            **kwargs,
+        )
 
     @property
     def platform_name(self) -> str:
@@ -172,7 +213,7 @@ class ESPNAdapter(FantasyPlatformClient):
             for host in ESPN_API_HOSTS:
                 url = f"{host}/seasons/{yr}/segments/0/leagues/{league_id}"
                 try:
-                    resp = self.session.get(url, params=params, timeout=10)
+                    resp = self._get(url, params=params)
                     if resp.status_code in (401, 403, 404):
                         last_error = f"HTTP {resp.status_code} from {url}"
                         continue
@@ -392,7 +433,7 @@ class ESPNAdapter(FantasyPlatformClient):
         )
 
         self.last_error = None
-        resp = self.session.post(url, json=payload, timeout=10)
+        resp = self._post(url, json=payload)
         if resp.status_code in (200, 201, 204):
             logger.info(f"[ESPN] Roster swap succeeded: {swap}")
             return True

@@ -1,8 +1,7 @@
-"""Unit tests for SleeperAdapter using standard unittest."""
-
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from requests.exceptions import ReadTimeout
 from ff_manager.models import Player, SwapDecision
 from ff_manager.platforms.sleeper import SleeperAdapter
 
@@ -186,6 +185,80 @@ class TestSleeperAdapter(unittest.TestCase):
         self.assertIn("roster_update_starters", payload["query"])
         self.assertIn('"4046", "7564"', payload["query"])
         self.assertEqual(call_args[1]["headers"]["authorization"], "test_jwt_token")
+
+    @patch("time.sleep")
+    def test_sleeper_get_roster_recovers_from_transient_read_timeout(self, mock_sleep):
+        adapter = SleeperAdapter(
+            auth_token="test_token",
+            user_id="user_123",
+            year=2024,
+            session=self.mock_session,
+            max_retries=3,
+            backoff_factor=0.01,
+        )
+        adapter.set_players_metadata({})
+
+        league_resp = MagicMock(status_code=200)
+        league_resp.json.return_value = {
+            "name": "My Sleeper League",
+            "roster_positions": ["QB", "BN"],
+        }
+        rosters_resp = MagicMock(status_code=200)
+        rosters_resp.json.return_value = [
+            {
+                "roster_id": 1,
+                "owner_id": "user_123",
+                "starters": [],
+                "players": [],
+                "reserve": [],
+            }
+        ]
+        nfl_resp = MagicMock(status_code=200)
+        nfl_resp.json.return_value = {"week": 1, "season": "2024"}
+
+        # First call to league endpoint times out, then succeeds
+        call_count = {"league": 0}
+
+        def fake_get(url, *args, **kwargs):
+            if url.endswith("/league/league_999"):
+                call_count["league"] += 1
+                if call_count["league"] == 1:
+                    raise ReadTimeout("HTTPSConnectionPool(host='api.sleeper.app', port=443): Read timed out. (read timeout=10)")
+                return league_resp
+            elif url.endswith("/rosters"):
+                return rosters_resp
+            elif "/state/nfl" in url:
+                return nfl_resp
+            mock_default = MagicMock(status_code=200)
+            mock_default.json.return_value = {}
+            return mock_default
+
+        self.mock_session.get.side_effect = fake_get
+
+        roster = adapter.get_roster(league_id="league_999")
+        self.assertEqual(roster.league_name, "My Sleeper League")
+        self.assertEqual(call_count["league"], 2)
+        mock_sleep.assert_called_once()
+
+    @patch("time.sleep")
+    def test_sleeper_get_roster_raises_after_max_retries(self, mock_sleep):
+        adapter = SleeperAdapter(
+            auth_token="test_token",
+            user_id="user_123",
+            year=2024,
+            session=self.mock_session,
+            max_retries=3,
+            backoff_factor=0.01,
+        )
+        self.mock_session.get.side_effect = ReadTimeout(
+            "HTTPSConnectionPool(host='api.sleeper.app', port=443): Read timed out. (read timeout=10)"
+        )
+
+        with self.assertRaises(ReadTimeout):
+            adapter.get_roster(league_id="league_999")
+
+        self.assertEqual(self.mock_session.get.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
 
 
 if __name__ == "__main__":

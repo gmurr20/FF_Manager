@@ -1,8 +1,7 @@
-"""Unit tests for ESPNAdapter using standard unittest."""
-
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from requests.exceptions import ReadTimeout
 from ff_manager.models import Player, SwapDecision
 from ff_manager.platforms.espn import ESPNAdapter
 
@@ -205,6 +204,87 @@ class TestESPNAdapter(unittest.TestCase):
         roster = adapter.get_roster(league_id="123456", team_id="1")
         self.assertEqual(roster.league_name, "Pre-Draft League")
         self.assertEqual(len(roster.players), 0)
+
+    @patch("time.sleep")
+    def test_espn_get_roster_recovers_from_transient_read_timeout(self, mock_sleep):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+            max_retries=3,
+            backoff_factor=0.01,
+        )
+
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "settings": {"name": "Test ESPN League"},
+            "status": {"currentScoringPeriod": 1},
+            "teams": [
+                {
+                    "id": 1,
+                    "location": "Boston",
+                    "nickname": "Bulldogs",
+                    "primaryOwner": "{1234-SWID}",
+                    "owners": ["{1234-SWID}"],
+                    "roster": {"entries": []},
+                }
+            ],
+        }
+
+        # First call times out, second succeeds
+        self.mock_session.get.side_effect = [
+            ReadTimeout("ESPN connection read timeout"),
+            mock_resp,
+        ]
+
+        roster = adapter.get_roster(league_id="123456", team_id="1")
+        self.assertEqual(roster.league_name, "Test ESPN League")
+        self.assertEqual(self.mock_session.get.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    @patch("time.sleep")
+    def test_espn_get_roster_raises_after_max_retries(self, mock_sleep):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+            max_retries=3,
+            backoff_factor=0.01,
+        )
+        self.mock_session.get.side_effect = ReadTimeout("ESPN connection read timeout")
+
+        with self.assertRaises(ValueError) as ctx:
+            adapter.get_roster(league_id="123456", team_id="1")
+
+        self.assertIn("Could not load ESPN league data", str(ctx.exception))
+
+    @patch("time.sleep")
+    def test_espn_execute_swap_retries_on_timeout(self, mock_sleep):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+            max_retries=3,
+            backoff_factor=0.01,
+        )
+
+        mock_resp = MagicMock(status_code=200)
+        self.mock_session.post.side_effect = [
+            ReadTimeout("ESPN transaction read timeout"),
+            mock_resp,
+        ]
+
+        starter = Player("101", "Injured WR", "WR", "WR", ["WR"], "OUT", 0.0)
+        replacement = Player("202", "Healthy WR", "WR", "BE", ["WR"], "ACTIVE", 12.5)
+        swap = SwapDecision(starter=starter, replacement=replacement, slot="WR", reason="Injury: OUT")
+
+        success = adapter.execute_swap(league_id="123456", team_id="1", swap=swap)
+        self.assertTrue(success)
+        self.assertEqual(self.mock_session.post.call_count, 2)
+        mock_sleep.assert_called_once()
 
 
 if __name__ == "__main__":

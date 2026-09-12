@@ -6,6 +6,11 @@ from typing import List, Optional
 
 import requests
 
+from ff_manager.http import (
+    DEFAULT_BACKOFF_FACTOR,
+    DEFAULT_MAX_RETRIES,
+    request_with_retry,
+)
 from ff_manager.models import ActionResult
 
 logger = logging.getLogger(__name__)
@@ -49,7 +54,11 @@ def init_db(conn) -> None:
     conn.commit()
 
 
-def get_nfl_week() -> str:
+def get_nfl_week(
+    timeout: int = 15,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
+) -> str:
     """
     Fetch the current NFL week from Sleeper's public state endpoint.
 
@@ -57,7 +66,15 @@ def get_nfl_week() -> str:
     Falls back to "unknown" on failure so fingerprinting still works.
     """
     try:
-        resp = requests.get("https://api.sleeper.app/v1/state/nfl", timeout=5)
+        resp = request_with_retry(
+            session=requests,
+            method="GET",
+            url="https://api.sleeper.app/v1/state/nfl",
+            timeout=timeout,
+            max_retries=max_retries,
+            backoff_factor=backoff_factor,
+            platform_name="SleeperNFLState",
+        )
         resp.raise_for_status()
         data = resp.json()
         season = data.get("season", "unknown")

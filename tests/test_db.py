@@ -7,6 +7,7 @@ from ff_manager.db import (
     clear_fingerprint,
     compute_fingerprint,
     get_last_fingerprint,
+    get_nfl_week,
     save_fingerprint,
 )
 from ff_manager.models import ActionResult, Player, SwapDecision
@@ -154,6 +155,42 @@ class TestDatabaseOperations(unittest.TestCase):
         conn.commit.assert_called_once()
         sql = cursor.execute.call_args[0][0]
         self.assertIn("DELETE", sql)
+
+
+class TestGetNflWeek(unittest.TestCase):
+    @patch("requests.get")
+    def test_get_nfl_week_success(self, mock_get):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"season": "2026", "season_type": "regular", "week": 3}
+        mock_get.return_value = mock_resp
+
+        week_str = get_nfl_week(timeout=15, max_retries=3)
+        self.assertEqual(week_str, "2026_regular_3")
+        mock_get.assert_called_once()
+
+    @patch("time.sleep")
+    @patch("requests.get")
+    def test_get_nfl_week_retries_on_timeout_and_succeeds(self, mock_get, mock_sleep):
+        from requests.exceptions import ReadTimeout
+        ok_resp = MagicMock(status_code=200)
+        ok_resp.json.return_value = {"season": "2026", "season_type": "regular", "week": 3}
+        mock_get.side_effect = [ReadTimeout("Read timed out"), ok_resp]
+
+        week_str = get_nfl_week(timeout=15, max_retries=3, backoff_factor=0.01)
+        self.assertEqual(week_str, "2026_regular_3")
+        self.assertEqual(mock_get.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    @patch("time.sleep")
+    @patch("requests.get")
+    def test_get_nfl_week_falls_back_to_unknown_after_max_retries(self, mock_get, mock_sleep):
+        from requests.exceptions import ReadTimeout
+        mock_get.side_effect = ReadTimeout("Read timed out")
+
+        week_str = get_nfl_week(timeout=15, max_retries=3, backoff_factor=0.01)
+        self.assertEqual(week_str, "unknown")
+        self.assertEqual(mock_get.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
 
 
 if __name__ == "__main__":
