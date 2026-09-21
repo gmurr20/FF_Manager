@@ -151,6 +151,8 @@ class TestSleeperAdapter(unittest.TestCase):
                         "players": ["4046", "6797", "7564"],
                     }
                 ]
+            elif "/state/nfl" in url:
+                resp.json.return_value = {"week": 1, "leg": 1, "season_type": "regular"}
             return resp
 
         self.mock_session.get.side_effect = fake_get
@@ -182,6 +184,9 @@ class TestSleeperAdapter(unittest.TestCase):
         call_args = self.mock_session.post.call_args
         self.assertIn("graphql", call_args[0][0])
         payload = call_args[1]["json"]
+        self.assertIn("update_matchup_leg", payload["query"])
+        self.assertIn("round: 1", payload["query"])
+        self.assertIn("leg: 1", payload["query"])
         self.assertIn("roster_update_starters", payload["query"])
         self.assertIn('"4046", "7564"', payload["query"])
         self.assertEqual(call_args[1]["headers"]["authorization"], "test_jwt_token")
@@ -259,6 +264,42 @@ class TestSleeperAdapter(unittest.TestCase):
 
         self.assertEqual(self.mock_session.get.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_sleeper_is_player_locked(self):
+        adapter = SleeperAdapter(
+            auth_token="test_token",
+            user_id="user_123",
+            session=self.mock_session,
+        )
+
+        # 1. Player with non-zero points in active matchup is locked
+        self.assertTrue(
+            adapter._is_player_locked(
+                player_meta={"team": "KC"},
+                player_id="101",
+                matchup_player_points={"101": 4.5},
+            )
+        )
+
+        # 2. Player whose NFL team is in locked_teams is locked
+        self.assertTrue(
+            adapter._is_player_locked(
+                player_meta={"team": "DET"},
+                player_id="102",
+                locked_teams={"DET", "BUF"},
+                matchup_player_points={"102": 0.0},
+            )
+        )
+
+        # 3. Player whose team is not locked and has no points is not locked
+        self.assertFalse(
+            adapter._is_player_locked(
+                player_meta={"team": "LAR"},
+                player_id="103",
+                locked_teams={"DET", "BUF"},
+                matchup_player_points={"103": 0.0},
+            )
+        )
 
 
 if __name__ == "__main__":

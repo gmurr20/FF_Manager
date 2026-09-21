@@ -161,9 +161,14 @@ class TestESPNAdapter(unittest.TestCase):
         self.assertTrue(success)
         self.mock_session.post.assert_called_once()
         call_args = self.mock_session.post.call_args
+        self.assertIn("lm-api-writes.fantasy.espn.com", call_args[0][0])
         self.assertIn("transactions", call_args[0][0])
         payload = call_args[1]["json"]
         self.assertEqual(payload["executionType"], "EXECUTE")
+        self.assertEqual(payload["isLeagueManager"], False)
+        self.assertEqual(payload["teamId"], 1)
+        self.assertEqual(payload["memberId"], "{1234-SWID}")
+        self.assertEqual(payload["scoringPeriodId"], 1)
         self.assertEqual(len(payload["items"]), 2)
         # Verify replacement moved from 20 (BE) to 4 (WR)
         self.assertEqual(payload["items"][0]["playerId"], 202)
@@ -173,6 +178,57 @@ class TestESPNAdapter(unittest.TestCase):
         self.assertEqual(payload["items"][1]["playerId"], 101)
         self.assertEqual(payload["items"][1]["fromLineupSlotId"], 4)
         self.assertEqual(payload["items"][1]["toLineupSlotId"], 20)
+
+    def test_espn_execute_swap_empty_slot(self):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+        )
+        adapter._current_scoring_period = 2
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        self.mock_session.post.return_value = mock_resp
+
+        starter = Player("0", "[Empty FLEX]", "FLEX", "FLEX", ["FLEX"], "EMPTY", 0.0)
+        replacement = Player("303", "Bench RB", "RB", "BE", ["RB", "FLEX"], "ACTIVE", 14.2)
+        swap = SwapDecision(starter=starter, replacement=replacement, slot="FLEX", reason="Fill empty slot")
+
+        success = adapter.execute_swap(league_id="123456", team_id="5", swap=swap)
+
+        self.assertTrue(success)
+        call_args = self.mock_session.post.call_args
+        payload = call_args[1]["json"]
+        self.assertEqual(payload["teamId"], 5)
+        self.assertEqual(payload["scoringPeriodId"], 2)
+        # Only 1 item for empty starter
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertEqual(payload["items"][0]["playerId"], 303)
+        self.assertEqual(payload["items"][0]["toLineupSlotId"], 23)  # FLEX
+        self.assertEqual(payload["items"][0]["fromLineupSlotId"], 20)  # BE
+
+    def test_espn_execute_swap_failure_parsing(self):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.json.return_value = {"messages": ["Invalid Input."]}
+        self.mock_session.post.return_value = mock_resp
+
+        starter = Player("101", "Injured WR", "WR", "WR", ["WR"], "OUT", 0.0)
+        replacement = Player("202", "Healthy WR", "WR", "BE", ["WR"], "ACTIVE", 12.5)
+        swap = SwapDecision(starter=starter, replacement=replacement, slot="WR", reason="Injury: OUT")
+
+        success = adapter.execute_swap(league_id="123456", team_id="1", swap=swap)
+        self.assertFalse(success)
+        self.assertIn("Invalid Input.", adapter.last_error)
 
 
     def test_espn_pre_draft_league(self):
@@ -285,6 +341,65 @@ class TestESPNAdapter(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(self.mock_session.post.call_count, 2)
         mock_sleep.assert_called_once()
+
+    def test_espn_get_roster_lineup_locked(self):
+        adapter = ESPNAdapter(
+            espn_s2="test_s2",
+            swid="{1234-SWID}",
+            year=2024,
+            session=self.mock_session,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "settings": {"name": "Test ESPN League"},
+            "status": {"currentScoringPeriod": 1},
+            "teams": [
+                {
+                    "id": 1,
+                    "location": "Boston",
+                    "nickname": "Bulldogs",
+                    "primaryOwner": "{1234-SWID}",
+                    "owners": ["{1234-SWID}"],
+                    "roster": {
+                        "entries": [
+                            {
+                                "lineupSlotId": 0,
+                                "playerPoolEntry": {
+                                    "lineupLocked": True,
+                                    "rosterLocked": True,
+                                    "player": {
+                                        "id": 1,
+                                        "fullName": "Mid-Game Injured QB",
+                                        "defaultPositionId": 1,
+                                        "injuryStatus": "OUT",
+                                    },
+                                },
+                            },
+                            {
+                                "lineupSlotId": 20,
+                                "playerPoolEntry": {
+                                    "lineupLocked": False,
+                                    "rosterLocked": False,
+                                    "player": {
+                                        "id": 2,
+                                        "fullName": "Unplayed Bench QB",
+                                        "defaultPositionId": 1,
+                                        "injuryStatus": "ACTIVE",
+                                    },
+                                },
+                            },
+                        ]
+                    },
+                }
+            ],
+        }
+        self.mock_session.get.return_value = mock_resp
+
+        roster = adapter.get_roster(league_id="123456", team_id="1")
+        self.assertTrue(roster.players[0].is_locked)
+        self.assertFalse(roster.players[1].is_locked)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from ff_manager.models import Player, Roster, SwapDecision
 logger = logging.getLogger(__name__)
 
 SLEEPER_API_BASE = "https://api.sleeper.app/v1"
-SLEEPER_GRAPHQL_URL = "https://sleeper.app/graphql"
+SLEEPER_GRAPHQL_URL = "https://sleeper.com/graphql"
 
 
 class SleeperAdapter(FantasyPlatformClient):
@@ -67,6 +67,7 @@ class SleeperAdapter(FantasyPlatformClient):
         self._players_cache: Optional[Dict[str, Any]] = None
         self._nfl_state_cache: Optional[Dict[str, Any]] = None
         self._active_roster_starters: Dict[str, List[str]] = {}
+        self._schedule_locked_teams: Dict[Any, Set[str]] = {}
         self.last_error: Optional[str] = None
 
     def _get(self, url: str, timeout: Optional[int] = None, **kwargs) -> Any:
@@ -305,8 +306,16 @@ class SleeperAdapter(FantasyPlatformClient):
             scoring_settings=scoring_settings,
         )
 
+        season_val = nfl_state.get("season", self.year)
+        locked_teams = self.get_locked_teams(
+            season=str(season_val),
+            season_type=str(season_type),
+            week=int(current_week),
+        )
+
         # Check if matchups endpoint has active week starters for this roster
         matchup_starters = None
+        matchup_player_points: Dict[str, float] = {}
         try:
             matchups_url = f"{SLEEPER_API_BASE}/league/{league_id}/matchups/{current_week}"
             m_resp = self._get(matchups_url, headers=self._get_headers())
@@ -316,7 +325,8 @@ class SleeperAdapter(FantasyPlatformClient):
                         m_starters = m.get("starters")
                         if m_starters:
                             matchup_starters = list(m_starters)
-                            break
+                        matchup_player_points = m.get("players_points", {}) or {}
+                        break
         except Exception:
             pass
 
@@ -382,7 +392,12 @@ class SleeperAdapter(FantasyPlatformClient):
                 eligible_slots.append("FLEX")
 
             proj_pts = projections_map.get(pid, 0.0)
-            is_locked = self._is_player_locked(meta)
+            is_locked = self._is_player_locked(
+                meta,
+                player_id=str(pid),
+                locked_teams=locked_teams,
+                matchup_player_points=matchup_player_points,
+            )
 
             parsed_players.append(
                 Player(
@@ -552,8 +567,102 @@ class SleeperAdapter(FantasyPlatformClient):
 
         return projections
 
-    def _is_player_locked(self, player_meta: Dict[str, Any]) -> bool:
-        """Check if an NFL player's game has started."""
+    def get_locked_teams(
+        self,
+        season: str,
+        season_type: str = "regular",
+        week: int = 1,
+    ) -> Set[str]:
+        """Fetch locked NFL teams whose game is in progress or completed for the given week."""
+        cache_key = (str(season), str(season_type), int(week))
+        if cache_key in self._schedule_locked_teams:
+            return self._schedule_locked_teams[cache_key]
+
+        locked: Set[str] = set()
+        today_str = str(datetime.date.today())
+
+        # 1. Sleeper schedule endpoint
+        try:
+            url = f"https://api.sleeper.app/schedule/nfl/{season_type}/{season}"
+            resp = self._get(url)
+            if resp.status_code == 200:
+                games = resp.json()
+                if isinstance(games, list):
+                    for g in games:
+                        if g.get("week") == week:
+                            status = str(g.get("status", "")).lower()
+                            game_date = str(g.get("date", ""))
+                            # Game is complete, in progress, active, or occurred on a prior date
+                            if status in ("complete", "in_progress", "active", "halftime") or (
+                                game_date and game_date < today_str
+                            ):
+                                if g.get("home"):
+                                    locked.add(str(g.get("home")).upper())
+                                if g.get("away"):
+                                    locked.add(str(g.get("away")).upper())
+        except Exception as e:
+            logger.warning(f"[Sleeper] Could not load NFL schedule: {e}")
+
+        # 2. Live NFL Scoreboard (ESPN) for real-time kickoff timestamps and in-progress/post game states
+        try:
+            sb_resp = self._get(
+                "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+                timeout=5,
+            )
+            if sb_resp.status_code == 200:
+                sb_data = sb_resp.json()
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                for ev in sb_data.get("events", []):
+                    ev_state = str(ev.get("status", {}).get("type", {}).get("state", "")).lower()
+                    ev_date_str = ev.get("date")
+                    game_started = ev_state in ("in", "post")
+                    if not game_started and ev_date_str:
+                        try:
+                            ev_dt = datetime.datetime.fromisoformat(
+                                str(ev_date_str).replace("Z", "+00:00")
+                            )
+                            if now_utc >= ev_dt:
+                                game_started = True
+                        except Exception:
+                            pass
+
+                    if game_started:
+                        for comp in ev.get("competitions", []):
+                            for competitor in comp.get("competitors", []):
+                                abbr = competitor.get("team", {}).get("abbreviation")
+                                if abbr:
+                                    abbr_clean = str(abbr).upper()
+                                    locked.add(abbr_clean)
+                                    if abbr_clean == "WSH":
+                                        locked.add("WAS")
+                                    elif abbr_clean == "WAS":
+                                        locked.add("WSH")
+        except Exception as e:
+            logger.debug(f"[Sleeper] Live scoreboard lookup skipped: {e}")
+
+        self._schedule_locked_teams[cache_key] = locked
+        return locked
+
+    def _is_player_locked(
+        self,
+        player_meta: Dict[str, Any],
+        player_id: Optional[str] = None,
+        locked_teams: Optional[Set[str]] = None,
+        matchup_player_points: Optional[Dict[str, float]] = None,
+    ) -> bool:
+        """Check if an NFL player's game has started or is in progress."""
+        # 1. If player has already scored points in this week's active matchup
+        if player_id and matchup_player_points:
+            pts = matchup_player_points.get(str(player_id))
+            if pts is not None and float(pts) != 0.0:
+                return True
+
+        # 2. If player's NFL team is in progress, finished, or kicked off
+        team = player_meta.get("team")
+        if team and locked_teams and str(team).upper() in locked_teams:
+            return True
+
+        # 3. If player's individual kickoff time has passed
         kickoff = player_meta.get("kickoff_time") or player_meta.get("game_time")
         if kickoff:
             try:
@@ -644,7 +753,7 @@ class SleeperAdapter(FantasyPlatformClient):
         self.last_error = None
 
         nfl_state = self.get_nfl_state()
-        season_type = nfl_state.get("season_type", "regular")
+        season_type = nfl_state.get("season_type", "regular") if isinstance(nfl_state, dict) else "regular"
         if season_type == "pre":
             try:
                 league_url = f"{SLEEPER_API_BASE}/league/{league_id}"
@@ -652,8 +761,19 @@ class SleeperAdapter(FantasyPlatformClient):
                 current_week = l_resp.json().get("settings", {}).get("start_week", 1) if l_resp.status_code == 200 else 1
             except Exception:
                 current_week = 1
+            current_leg = current_week
         else:
-            current_week = nfl_state.get("week", 1)
+            current_week = nfl_state.get("week", 1) if isinstance(nfl_state, dict) else 1
+            current_leg = nfl_state.get("leg", current_week) if isinstance(nfl_state, dict) else current_week
+
+        try:
+            current_week = int(current_week)
+        except (ValueError, TypeError):
+            current_week = 1
+        try:
+            current_leg = int(current_leg)
+        except (ValueError, TypeError):
+            current_leg = current_week
 
         # Primary: Sleeper GraphQL mutation (matchup leg for active week + base roster)
         try:
@@ -662,7 +782,7 @@ class SleeperAdapter(FantasyPlatformClient):
             mutation {{
                 matchup_res: update_matchup_leg(
                     round: {current_week},
-                    leg: 1,
+                    leg: {current_leg},
                     league_id: "{league_id}",
                     roster_id: {int(team_id)},
                     starters: {formatted_starters}
@@ -715,12 +835,14 @@ class SleeperAdapter(FantasyPlatformClient):
             self.last_error = str(e)
             logger.error(f"[Sleeper] GraphQL mutation exception: {e}")
 
-        # Fallback: Individual roster_update_starters if multi-mutation is unsupported
+        # Fallback: update_matchup_leg single mutation (in case combined mutation had an issue)
         try:
             formatted_starters = json.dumps(updated_starters)
             gql_single_query = f"""
             mutation {{
-                roster_update_starters(
+                matchup_res: update_matchup_leg(
+                    round: {current_week},
+                    leg: {current_leg},
                     league_id: "{league_id}",
                     roster_id: {int(team_id)},
                     starters: {formatted_starters}
@@ -737,12 +859,14 @@ class SleeperAdapter(FantasyPlatformClient):
             )
             if gql_resp2.status_code == 200:
                 data2 = gql_resp2.json()
-                if "errors" not in data2 and "data" in data2 and data2["data"].get("roster_update_starters"):
-                    res_starters = data2["data"]["roster_update_starters"].get("starters")
-                    self._active_roster_starters[roster_key] = res_starters or updated_starters
-                    logger.info(f"[Sleeper] Successfully updated starters via single GraphQL: {swap}")
-                    return True
-        except Exception:
-            pass
+                if "errors" not in data2 and "data" in data2 and data2["data"].get("matchup_res"):
+                    res_starters = data2["data"]["matchup_res"].get("starters")
+                    if res_starters and replacement_id in res_starters:
+                        self._active_roster_starters[roster_key] = res_starters
+                        logger.info(f"[Sleeper] Successfully updated starters via single update_matchup_leg: {swap}")
+                        return True
+        except Exception as e:
+            logger.warning(f"[Sleeper] Fallback single update_matchup_leg exception: {e}")
 
         return False
+

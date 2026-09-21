@@ -82,6 +82,8 @@ ESPN_API_HOSTS = [
     "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl",
     "https://fantasy.espn.com/apis/v3/games/ffl",
 ]
+ESPN_API_WRITES_HOST = "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl"
+
 
 
 class ESPNAdapter(FantasyPlatformClient):
@@ -129,6 +131,7 @@ class ESPNAdapter(FantasyPlatformClient):
             self.session = None
 
         self.last_error: Optional[str] = None
+        self._current_scoring_period: int = 1
         if self.session is not None:
             self._setup_session()
 
@@ -174,6 +177,8 @@ class ESPNAdapter(FantasyPlatformClient):
                 {
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept": "application/json",
+                    "Origin": "https://fantasy.espn.com",
+                    "Referer": "https://fantasy.espn.com/",
                     "X-Fantasy-Platform": "kona-api-web",
                     "X-Fantasy-Source": "kona",
                     "Cookie": f"espn_s2={self.espn_s2}; SWID={self.swid}",
@@ -240,7 +245,14 @@ class ESPNAdapter(FantasyPlatformClient):
         )
 
         league_name = data.get("settings", {}).get("name", f"ESPN League {league_id}")
-        current_scoring_period = data.get("status", {}).get("currentScoringPeriod", 1)
+        current_scoring_period = (
+            data.get("scoringPeriodId")
+            or data.get("status", {}).get("latestScoringPeriod")
+            or data.get("status", {}).get("currentScoringPeriod")
+            or data.get("status", {}).get("currentMatchupPeriod")
+            or 1
+        )
+        self._current_scoring_period = current_scoring_period
 
         # Identify target team
         teams = data.get("teams", [])
@@ -316,7 +328,11 @@ class ESPNAdapter(FantasyPlatformClient):
                     break
 
             # Locked status
-            is_locked = bool(player_pool_entry.get("locked", False))
+            is_locked = bool(
+                player_pool_entry.get("lineupLocked")
+                or player_pool_entry.get("rosterLocked")
+                or player_pool_entry.get("locked", False)
+            )
             if not is_locked:
                 pro_team_schedule = player_data.get("proTeamSchedule", {}) or {}
                 game_time = pro_team_schedule.get("date")
@@ -395,15 +411,18 @@ class ESPNAdapter(FantasyPlatformClient):
         if self.session is None:
             raise RuntimeError("HTTP session not initialized (requests library required).")
 
-        url = f"https://fantasy.espn.com/apis/v3/games/ffl/seasons/{self.year}/segments/0/leagues/{league_id}/transactions/"
+        url = f"{ESPN_API_WRITES_HOST}/seasons/{self.year}/segments/0/leagues/{league_id}/transactions/"
         target_slot_id = ESPN_SLOT_NAME_TO_ID.get(swap.slot.upper(), 20)
         bench_slot_id = ESPN_SLOT_NAME_TO_ID.get("BE", 20)
+        from_slot_id = ESPN_SLOT_NAME_TO_ID.get(
+            getattr(swap.replacement, "lineup_slot", "BE").upper(), bench_slot_id
+        )
 
         items = [
             {
                 "playerId": int(swap.replacement.player_id),
                 "type": "LINEUP",
-                "fromLineupSlotId": bench_slot_id,
+                "fromLineupSlotId": from_slot_id,
                 "toLineupSlotId": target_slot_id,
             }
         ]
@@ -411,11 +430,14 @@ class ESPNAdapter(FantasyPlatformClient):
         if not swap.starter.is_empty and swap.starter.player_id not in ("0", "", None):
             try:
                 starter_pid_int = int(swap.starter.player_id)
+                starter_from_slot_id = ESPN_SLOT_NAME_TO_ID.get(
+                    getattr(swap.starter, "lineup_slot", swap.slot).upper(), target_slot_id
+                )
                 items.append(
                     {
                         "playerId": starter_pid_int,
                         "type": "LINEUP",
-                        "fromLineupSlotId": target_slot_id,
+                        "fromLineupSlotId": starter_from_slot_id,
                         "toLineupSlotId": bench_slot_id,
                     }
                 )
@@ -423,8 +445,12 @@ class ESPNAdapter(FantasyPlatformClient):
                 pass
 
         payload = {
-            "executionType": "EXECUTE",
+            "isLeagueManager": False,
+            "teamId": int(team_id),
             "type": "ROSTER",
+            "memberId": self.swid,
+            "scoringPeriodId": getattr(self, "_current_scoring_period", 1),
+            "executionType": "EXECUTE",
             "items": items,
         }
 
@@ -440,7 +466,15 @@ class ESPNAdapter(FantasyPlatformClient):
         else:
             try:
                 err_json = resp.json()
-                err_msg = err_json.get("message") or err_json.get("error", {}).get("message") or str(err_json)
+                messages = err_json.get("messages")
+                if messages and isinstance(messages, list):
+                    err_msg = "; ".join(str(m) for m in messages)
+                else:
+                    err_msg = (
+                        err_json.get("message")
+                        or err_json.get("error", {}).get("message")
+                        or str(err_json)
+                    )
             except Exception:
                 err_msg = resp.text
             self.last_error = f"HTTP {resp.status_code}: {err_msg}"
